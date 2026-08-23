@@ -1,0 +1,135 @@
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { relative, resolve } from "node:path";
+import { WebSocket } from "ws";
+
+const envFile = readFileSync(resolve(process.cwd(), ".env"), "utf8");
+const fileEnv = Object.fromEntries(envFile.split(/\r?\n/).filter((line) => line && !line.startsWith("#")).map((line) => line.split(/=(.*)/s).slice(0, 2)));
+const token = process.env.REMOTE_WEB_TOKEN ?? fileEnv.REMOTE_WEB_TOKEN ?? "";
+const url = process.env.E2E_URL ?? "ws://127.0.0.1:8787/ws";
+const projectRoot = resolve(process.cwd());
+const runTurn = process.env.E2E_RUN_TURN !== "0";
+const marker = `CODEX_MESH_E2E_OK_${Date.now()}`;
+
+const socket = new WebSocket(url, { perMessageDeflate: false });
+let nextId = 0;
+const pending = new Map();
+const turnWaiters = new Map();
+const streamedText = new Map();
+
+function call(method, params) {
+  return new Promise((resolveCall, rejectCall) => {
+    const id = String(++nextId);
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      rejectCall(new Error(`RPC timed out: ${method}`));
+    }, 90_000);
+    pending.set(id, {
+      resolve: (value) => { clearTimeout(timer); resolveCall(value); },
+      reject: (error) => { clearTimeout(timer); rejectCall(error); },
+    });
+    socket.send(JSON.stringify({ type: "rpc", id, method, params }));
+  });
+}
+
+const ready = new Promise((resolveReady, rejectReady) => {
+  socket.once("open", () => socket.send(JSON.stringify({ type: "auth", token })));
+  socket.on("message", (raw) => {
+    const message = JSON.parse(String(raw));
+    if (message.type === "ready") resolveReady();
+    if (message.type === "event") {
+      const threadId = message.params?.threadId;
+      if (message.method === "item/agentMessage/delta" && threadId) streamedText.set(threadId, (streamedText.get(threadId) ?? "") + (message.params.delta ?? ""));
+      if (message.method === "turn/completed" && threadId) {
+        const turnId = message.params?.turn?.id;
+        const waiter = turnWaiters.get(`${threadId}:${turnId}`);
+        if (waiter) {
+          turnWaiters.delete(`${threadId}:${turnId}`);
+          clearTimeout(waiter.timer);
+          waiter.resolve({ status: message.params.turn.status, assistant: streamedText.get(threadId) ?? "" });
+        }
+      }
+    }
+    if (message.type !== "rpcResult") return;
+    const entry = pending.get(String(message.id));
+    if (!entry) return;
+    pending.delete(String(message.id));
+    if (message.error) entry.reject(new Error(message.error.message));
+    else entry.resolve(message.result);
+  });
+  socket.once("error", rejectReady);
+});
+
+async function main() {
+  await ready;
+  const listedProjects = await call("project/list", { limit: 100 });
+  let project = listedProjects.data.find((item) => item.roots.some((root) => root.path === projectRoot));
+  if (!project) {
+    project = (await call("project/create", {
+      name: "Codex Mesh",
+      roots: [{ path: projectRoot }],
+      metadata: { source: "local-e2e" },
+      idempotencyKey: randomUUID(),
+    })).project;
+  }
+
+  const listedThreads = await call("thread/list", { limit: 100, sortKey: "updated_at", sortDirection: "desc" });
+  const explicitSource = process.env.E2E_THREAD_ID;
+  const source = explicitSource
+    ? listedThreads.data.find((thread) => thread.id === explicitSource)
+    : listedThreads.data.find((thread) => thread.cwd === projectRoot && thread.status?.type !== "active")
+      ?? listedThreads.data.find((thread) => thread.projectId === project.id && thread.status?.type !== "active");
+  if (!source) throw new Error("No non-active source thread found; set E2E_THREAD_ID to a completed local thread");
+
+  const projectRelativeRoot = relative(source.cwd, projectRoot) || ".";
+  const readmePath = projectRelativeRoot === "." ? "README.md" : `${projectRelativeRoot}/README.md`;
+  const iconPath = projectRelativeRoot === "." ? "web/public/icon.svg" : `${projectRelativeRoot}/web/public/icon.svg`;
+  const directory = await call("bridge/fs/readDirectory", { threadId: source.id, path: projectRelativeRoot });
+  const readme = await call("bridge/fs/readFile", { threadId: source.id, path: readmePath });
+  const image = await call("bridge/fs/readFile", { threadId: source.id, path: iconPath });
+  let traversalBlocked = false;
+  try {
+    await call("bridge/fs/readFile", { threadId: source.id, path: "/etc/hosts" });
+  } catch (error) {
+    traversalBlocked = error.message.includes("outside the thread working directory");
+  }
+  if (!directory.entries.some((entry) => entry.name === "README.md")) throw new Error("Directory E2E did not list README.md");
+  if (readme.kind !== "text" || !readme.content.startsWith("# Codex Remote Web")) throw new Error("Text preview E2E failed");
+  if (image.kind !== "image" || !image.dataUrl.startsWith("data:image/svg+xml;base64,")) throw new Error("Image preview E2E failed");
+  if (!traversalBlocked) throw new Error("File traversal guard E2E failed");
+
+  let forkResult = null;
+  if (runTurn) {
+    let fork;
+    try {
+      fork = (await call("thread/fork", { threadId: source.id, ephemeral: true })).thread;
+    } catch (error) {
+      if (!error.message.includes("excludeTurns")) throw error;
+      fork = (await call("thread/fork", { threadId: source.id, ephemeral: true, excludeTurns: true })).thread;
+    }
+    const turn = (await call("turn/start", {
+      threadId: fork.id,
+      input: [{ type: "text", text: `本机 E2E 测试。不要调用工具，只回复：${marker}`, text_elements: [] }],
+    })).turn;
+    const completed = await new Promise((resolveTurn, rejectTurn) => {
+      const key = `${fork.id}:${turn.id}`;
+      const timer = setTimeout(() => { if (turnWaiters.delete(key)) rejectTurn(new Error("Timed out waiting for forked turn")); }, 90_000);
+      turnWaiters.set(key, { resolve: resolveTurn, timer });
+    });
+    if (completed.status !== "completed" || !completed.assistant.includes(marker)) throw new Error("Fork/turn E2E failed");
+    forkResult = { threadId: fork.id, forkedFromId: fork.forkedFromId, turnId: turn.id, status: completed.status, marker };
+  }
+
+  console.log(JSON.stringify({
+    ok: true,
+    project: { id: project.id, name: project.name, root: project.roots[0]?.path },
+    sourceThreadId: source.id,
+    files: { entries: directory.entries.length, text: readme.path, image: image.path, traversalBlocked },
+    fork: forkResult,
+  }, null, 2));
+}
+
+main().catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+}).finally(() => socket.close());

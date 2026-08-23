@@ -11,7 +11,7 @@ export interface ThreadItem {
   status?: unknown;
   aggregatedOutput?: string | null;
   exitCode?: number | null;
-  changes?: unknown[];
+  changes?: Array<{ path: string; kind: string | { type?: string; move_path?: string | null }; diff: string }>;
   server?: string;
   tool?: unknown;
   arguments?: unknown;
@@ -29,6 +29,8 @@ export interface Turn {
 
 export interface Thread {
   id: string;
+  sessionId?: string;
+  forkedFromId?: string | null;
   name: string | null;
   preview: string;
   cwd: string;
@@ -36,8 +38,19 @@ export interface Thread {
   updatedAt: number;
   status: unknown;
   turns: Turn[];
+  projectId?: string | null;
   modelProvider?: string;
   gitInfo?: { branch?: string; repositoryUrl?: string } | null;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  roots: Array<{ path: string }>;
+  metadata: Record<string, string | undefined>;
+  position: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface ServerRequest {

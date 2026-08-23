@@ -6,7 +6,10 @@
 
 - 优先连接本机 Codex daemon，共享已加载线程；不可用时启动 `codex app-server --stdio`
 - 任务列表、创建、恢复和完整历史读取
+- 原生 Codex Project 管理；未归属任务按工作目录自动分组
+- Thread Fork、`/fork`/`/side` 命令和并行侧边聊天
 - 实时 assistant delta、命令输出、文件变更、计划和工具卡片
+- Unified diff、受限文件浏览、文本和图片预览
 - 发送后续指令、选择模型/推理强度、中断正在执行的 turn
 - 命令与文件变更审批，以及 `request_user_input` 问答
 - 共享 Token 鉴权、WebSocket 负载限制、app-server RPC 白名单
@@ -66,10 +69,20 @@ npm run protocol:generate
 
 这会把当前 CLI 的 TypeScript 协议生成到 `protocol/`（已 gitignore），用于比对方法名与 payload。
 
+## 本机真实 E2E
+
+服务启动后运行以下命令。测试会连接当前 WebSocket Bridge，读取真实 Project/thread/文件，创建 ephemeral fork，并通过本机 Codex 完成一个最小 turn：
+
+```bash
+npm run e2e:local
+```
+
+如果没有可用的已完成 thread，可以显式设置 `E2E_THREAD_ID`。设置 `E2E_RUN_TURN=0` 可跳过会产生模型调用的 fork/turn 部分。
+
 ## 下一阶段
 
 1. 图片/文件附件上传：服务端暂存后转换为 `localImage` / `localAudio` input。
-2. Git 面板：使用独立、受审批的 Git service，不开放通用 shell RPC。
+2. Git 状态与提交面板：使用独立、受审批的 Git service，不开放通用 shell RPC。
 3. 语音输入与系统通知：PWA Web Push + 浏览器录音。
 4. 配对协议：以一次性二维码交换设备密钥，替换共享 Token。
 5. 多主机和断线队列：每主机独立身份、持久化转发和通知。
