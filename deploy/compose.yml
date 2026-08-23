@@ -1,0 +1,33 @@
+name: codex-mesh
+
+services:
+  server:
+    build:
+      context: ..
+    image: codex-mesh-server:0.3.0
+    restart: unless-stopped
+    init: true
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      CODEX_LOCAL_MACHINE: "off"
+      CODEX_MESH_DATA_DIR: /data
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET is required}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:?BETTER_AUTH_URL is required}
+      TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:?TRUSTED_ORIGINS is required}
+      DATABASE_URL: ${DATABASE_URL:-}
+    ports:
+      - "127.0.0.1:${CODEX_MESH_PORT:-18787}:8787"
+    volumes:
+      - codex-mesh-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  codex-mesh-data:
+

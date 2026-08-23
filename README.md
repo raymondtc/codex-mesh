@@ -73,6 +73,8 @@ npx codex-mesh pair --server https://mesh.example.com --code XXXX-XXXX
 - Server 与 Agent 都只转发明确白名单中的 Codex RPC；文件读取被限制在会话工作目录内。
 - 如不希望 Server 使用本机 Codex，设置 `CODEX_LOCAL_MACHINE=off`。
 
+仓库提供了生产 Dockerfile、`deploy/compose.yml`、nginx WebSocket 反代示例和 Agent systemd user service。控制面容器默认使用只读根文件系统、非 root 用户和持久化 `/data` 卷。
+
 完整变量见 [.env.example](./.env.example)。
 
 ## 验证

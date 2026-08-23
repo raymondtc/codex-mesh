@@ -1,0 +1,9 @@
+.git
+.github
+.env
+.data
+**/dist
+**/node_modules
+*.log
+*.tgz
+
