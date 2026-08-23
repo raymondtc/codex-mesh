@@ -99,13 +99,14 @@ async function main() {
   if (!traversalBlocked) throw new Error("File traversal guard E2E failed");
 
   let forkResult = null;
+  let goalResult = null;
   if (runTurn) {
     let fork;
     try {
-      fork = (await call("thread/fork", { threadId: source.id, ephemeral: true })).thread;
+      fork = (await call("thread/fork", { threadId: source.id })).thread;
     } catch (error) {
       if (!error.message.includes("excludeTurns")) throw error;
-      fork = (await call("thread/fork", { threadId: source.id, ephemeral: true, excludeTurns: true })).thread;
+      fork = (await call("thread/fork", { threadId: source.id, excludeTurns: true })).thread;
     }
     const turn = (await call("turn/start", {
       threadId: fork.id,
@@ -117,7 +118,15 @@ async function main() {
       turnWaiters.set(key, { resolve: resolveTurn, timer });
     });
     if (completed.status !== "completed" || !completed.assistant.includes(marker)) throw new Error("Fork/turn E2E failed");
+    const objective = `E2E goal ${marker}`;
+    const goal = (await call("thread/goal/set", { threadId: fork.id, objective, status: "active", tokenBudget: 1000 })).goal;
+    const readGoal = (await call("thread/goal/get", { threadId: fork.id })).goal;
+    if (goal.objective !== objective || readGoal?.objective !== objective || readGoal?.tokenBudget !== 1000) throw new Error("Goal set/get E2E failed");
+    const cleared = await call("thread/goal/clear", { threadId: fork.id });
+    if (!cleared.cleared || (await call("thread/goal/get", { threadId: fork.id })).goal !== null) throw new Error("Goal clear E2E failed");
+    goalResult = { objective, tokenBudget: goal.tokenBudget, setGetClear: true };
     forkResult = { threadId: fork.id, forkedFromId: fork.forkedFromId, turnId: turn.id, status: completed.status, marker };
+    await call("thread/archive", { threadId: fork.id });
   }
 
   console.log(JSON.stringify({
@@ -126,6 +135,7 @@ async function main() {
     sourceThreadId: source.id,
     files: { entries: directory.entries.length, text: readme.path, image: image.path, traversalBlocked },
     fork: forkResult,
+    goal: goalResult,
   }, null, 2));
 }
 

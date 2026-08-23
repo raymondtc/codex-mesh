@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
+  CheckCircle2,
+  Copy,
   ArrowLeft,
   Bot,
   Check,
@@ -14,10 +16,16 @@ import {
   KeyRound,
   Image,
   Menu,
+  Pencil,
   MessageSquarePlus,
   PanelRightOpen,
   Plus,
   RefreshCw,
+  Search,
+  Target,
+  ThumbsDown,
+  ThumbsUp,
+  Trash2,
   Send,
   ShieldAlert,
   TerminalSquare,
@@ -26,7 +34,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { BridgeClient } from "./bridge";
-import type { ConnectionState, JsonObject, Project, ServerRequest, Thread, ThreadItem } from "./types";
+import type { ConnectionState, JsonObject, Project, ServerRequest, Thread, ThreadGoal, ThreadItem } from "./types";
 
 interface ModelInfo {
   id: string;
@@ -92,6 +100,11 @@ export default function App() {
   const [projectRoot, setProjectRoot] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [goal, setGoal] = useState<ThreadGoal | null>(null);
+  const [showGoal, setShowGoal] = useState(false);
+  const [goalObjective, setGoalObjective] = useState("");
+  const [goalBudget, setGoalBudget] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const refreshTimer = useRef<number | undefined>(undefined);
 
   const loadThreads = useCallback(async () => {
@@ -129,6 +142,11 @@ export default function App() {
     } catch {
       // A side thread can be briefly unavailable while its turn is being committed.
     }
+  }, [bridge]);
+
+  const loadGoal = useCallback(async (threadId: string) => {
+    const result = await bridge.call<{ goal: ThreadGoal | null }>("thread/goal/get", { threadId });
+    setGoal(result.goal);
   }, [bridge]);
 
   useEffect(() => {
@@ -189,6 +207,10 @@ export default function App() {
           if (method === "turn/completed" && threadId === sideThreadIdRef.current) setSideLiveText("");
         }, 120);
       }
+      if (method === "thread/goal/updated" && (params as { threadId?: string }).threadId === selectedIdRef.current) {
+        setGoal((params as { goal: ThreadGoal }).goal);
+      }
+      if (method === "thread/goal/cleared" && (params as { threadId?: string }).threadId === selectedIdRef.current) setGoal(null);
       if (method.startsWith("thread/") && method !== "thread/tokenUsage/updated") void loadThreads();
       if (method.startsWith("project/")) void loadProjects();
     };
@@ -208,14 +230,51 @@ export default function App() {
     setSidebarOpen(false);
     setError("");
     selectedIdRef.current = thread.id;
+    setGoal(null);
     setSelected({ ...thread, turns: thread.turns ?? [] });
     try {
       const result = await bridge.call<{ thread: Thread }>("thread/resume", { threadId: thread.id });
       setSelected(result.thread);
+      await loadGoal(thread.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       await refreshSelected();
     }
+  }
+
+  async function saveGoal(status: ThreadGoal["status"] = "active") {
+    if (!selected || (!goalObjective.trim() && !goal)) return;
+    setBusy(true);
+    try {
+      const result = await bridge.call<{ goal: ThreadGoal }>("thread/goal/set", {
+        threadId: selected.id,
+        ...(goalObjective.trim() ? { objective: goalObjective.trim() } : {}),
+        status,
+        tokenBudget: goalBudget ? Number(goalBudget) : null,
+      });
+      setGoal(result.goal); setShowGoal(false);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
+  }
+
+  async function clearGoal() {
+    if (!selected) return;
+    await bridge.call("thread/goal/clear", { threadId: selected.id });
+    setGoal(null); setShowGoal(false);
+  }
+
+  async function renameThread() {
+    if (!selected) return;
+    const name = window.prompt("输入新的对话名称", selected.name || selected.preview || "");
+    if (!name?.trim()) return;
+    await bridge.call("thread/name/set", { threadId: selected.id, name: name.trim() });
+    setSelected({ ...selected, name: name.trim() }); await loadThreads();
+  }
+
+  async function archiveThread() {
+    if (!selected || !window.confirm("归档当前对话？")) return;
+    await bridge.call("thread/archive", { threadId: selected.id });
+    selectedIdRef.current = null; setSelected(null); setGoal(null); await loadThreads();
   }
 
   async function createThread() {
@@ -458,7 +517,8 @@ export default function App() {
   }
 
   const running = selected ? isThreadActive(selected) : false;
-  const threadGroups = groupThreads(threads, projects);
+  const visibleThreads = threads.filter((thread) => !searchQuery.trim() || `${thread.name ?? ""} ${thread.preview} ${thread.cwd}`.toLowerCase().includes(searchQuery.toLowerCase()));
+  const threadGroups = groupThreads(visibleThreads, projects);
 
   return (
     <div className={`app-shell ${sideThread ? "with-side-chat" : ""}`}>
@@ -468,6 +528,7 @@ export default function App() {
           <button className="icon-button mobile-only" onClick={() => setSidebarOpen(false)} aria-label="关闭侧边栏"><X size={19} /></button>
         </header>
         <div className="sidebar-create"><button className="new-thread" onClick={() => setShowNewThread(true)}><MessageSquarePlus size={17} /> 新建任务</button><button className="project-button" onClick={() => { setProjectRoot(selected?.cwd ?? newCwd); setShowNewProject(true); }}><Plus size={15} /> 项目</button></div>
+        <label className="thread-search"><Search size={14} /><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索对话" /></label>
         <div className="thread-list">
           <div className="section-label"><span>项目与任务</span><button className="icon-button" onClick={() => { void loadProjects(); void loadThreads(); }} aria-label="刷新"><RefreshCw size={14} /></button></div>
           {threadGroups.map((group) => <section className="project-group" key={group.id}><div className="project-heading"><FolderGit2 size={13} /><strong>{group.name}</strong><span>{group.threads.length}</span></div>{group.threads.map((thread) => (
@@ -496,6 +557,9 @@ export default function App() {
           </div>
           {selected && <select className="project-select" value={selected.projectId ?? ""} onChange={(event) => void assignProject(event.target.value)} aria-label="所属项目"><option value="">按目录归类</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>}
           {selected && <button className="icon-button" onClick={() => void browseFiles(selected.id)} aria-label="浏览项目文件" title="文件"><FolderOpen size={17} /></button>}
+          {selected && <button className={`icon-button ${goal ? "goal-active" : ""}`} onClick={() => { setGoalObjective(goal?.objective ?? ""); setGoalBudget(goal?.tokenBudget?.toString() ?? ""); setShowGoal(true); }} aria-label="目标" title="目标"><Target size={17} /></button>}
+          {selected && <button className="icon-button" onClick={() => void renameThread()} aria-label="重命名" title="重命名"><Pencil size={16} /></button>}
+          {selected && <button className="icon-button" onClick={() => void archiveThread()} aria-label="归档" title="归档"><Archive size={16} /></button>}
           {selected && <button className="icon-button" onClick={() => void forkThread()} disabled={busy || running} aria-label="Fork 当前任务" title="Fork 当前任务"><GitFork size={17} /></button>}
           {selected && <button className="icon-button" onClick={() => void forkThread(true)} disabled={busy || running || Boolean(sideThread)} aria-label="在侧边聊天中 Fork" title="侧边聊天"><PanelRightOpen size={17} /></button>}
           {selected && <span className={`run-state ${running ? "running" : ""}`}>{running ? "执行中" : "就绪"}</span>}
@@ -520,6 +584,7 @@ export default function App() {
             </section>
 
             <section className="composer-wrap">
+              {goal && <GoalPill goal={goal} open={() => { setGoalObjective(goal.objective); setGoalBudget(goal.tokenBudget?.toString() ?? ""); setShowGoal(true); }} />}
               {requests.filter((request) => requestThreadId(request) !== sideThread?.id).map((request) => <ApprovalCard key={String(request.id)} request={request} resolve={(result) => resolveRequest(request, result)} />)}
               <div className="composer">
                 {draft.startsWith("/") && <CommandMenu choose={(command) => setDraft(command)} />}
@@ -586,6 +651,14 @@ export default function App() {
         </div>
       )}
 
+      {showGoal && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="目标设置"><section className="modal goal-modal">
+        <header><button className="icon-button" onClick={() => setShowGoal(false)}><ChevronLeft size={20} /></button><h2>{goal ? "管理目标" : "设定目标"}</h2></header>
+        <label htmlFor="goal-objective">目标描述</label><textarea id="goal-objective" rows={4} maxLength={4000} value={goalObjective} onChange={(event) => setGoalObjective(event.target.value)} placeholder="描述希望 Codex 持续推进的结果…" />
+        <label htmlFor="goal-budget">Token 预算（可选）</label><input id="goal-budget" type="number" min="1" value={goalBudget} onChange={(event) => setGoalBudget(event.target.value)} placeholder="例如 100000" />
+        {goal && <div className="goal-stats"><span>已用 {formatNumber(goal.tokensUsed)} tokens</span><span>{formatDuration(goal.timeUsedSeconds)}</span></div>}
+        <div className="goal-buttons">{goal && <button onClick={() => void clearGoal()}><Trash2 size={15} /> 清除</button>}{goal?.status === "active" && <button onClick={() => void saveGoal("paused")}>暂停</button>}<button className="primary" disabled={!goalObjective.trim() || busy} onClick={() => void saveGoal(goal?.status === "complete" ? "complete" : "active")}>{goal ? "保存" : "开始目标"}</button></div>
+      </section></div>}
+
       {showFiles && <div className="file-layer" role="dialog" aria-modal="true" aria-label="文件浏览器"><section className="file-browser">
         <header><div><span>THREAD FILES</span><strong>{filePath}</strong></div><button className="icon-button" onClick={() => setShowFiles(false)} aria-label="关闭文件浏览"><X size={18} /></button></header>
         <div className="file-browser-body">
@@ -601,12 +674,13 @@ export default function App() {
 }
 
 function TimelineItem({ item, threadId, openFile }: { item: ThreadItem; threadId: string; openFile: (threadId: string, path: string) => Promise<void> }) {
+  const [rating, setRating] = useState<"up" | "down" | null>(null);
   if (item.type === "userMessage") {
     const text = item.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") ?? "";
     return <article className="timeline-item user"><div className="bubble">{text}</div></article>;
   }
   if (item.type === "agentMessage") {
-    return <article className="timeline-item assistant"><div className="avatar"><Bot size={17} /></div><div className="bubble markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text ?? ""}</ReactMarkdown></div></article>;
+    return <article className="timeline-item assistant"><div className="avatar"><Bot size={17} /></div><div className="message-body"><div className="bubble markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text ?? ""}</ReactMarkdown></div><div className="message-actions"><button onClick={() => void navigator.clipboard.writeText(item.text ?? "")} title="复制回复"><Copy size={14} /> 复制</button><button className={rating === "up" ? "selected" : ""} onClick={() => setRating(rating === "up" ? null : "up")} title="有帮助"><ThumbsUp size={14} /></button><button className={rating === "down" ? "selected" : ""} onClick={() => setRating(rating === "down" ? null : "down")} title="没有帮助"><ThumbsDown size={14} /></button></div></div></article>;
   }
   if (item.type === "reasoning") {
     return <details className="tool-card reasoning"><summary><RefreshCw size={14} /> 思考过程</summary><div>{item.summary?.join("\n\n")}</div></details>;
@@ -631,6 +705,12 @@ function TimelineItem({ item, threadId, openFile }: { item: ThreadItem; threadId
     return <article className="plan-card"><strong>计划</strong><div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text ?? ""}</ReactMarkdown></div></article>;
   }
   return null;
+}
+
+function GoalPill({ goal, open }: { goal: ThreadGoal; open: () => void }) {
+  const complete = goal.status === "complete";
+  const percent = goal.tokenBudget ? Math.min(100, Math.round(goal.tokensUsed / goal.tokenBudget * 100)) : null;
+  return <button className={`goal-pill ${complete ? "complete" : ""}`} onClick={open}><span className="goal-icon">{complete ? <CheckCircle2 size={16} /> : <Target size={16} />}</span><span><strong>{complete ? "目标已达成" : goal.objective}</strong><small>{formatNumber(goal.tokensUsed)} tokens · {formatDuration(goal.timeUsedSeconds)}{percent !== null ? ` · ${percent}%` : ""}</small></span></button>;
 }
 
 function ApprovalCard({ request, resolve }: { request: ServerRequest; resolve: (result: unknown) => void }) {
@@ -712,6 +792,13 @@ function formatBytes(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatNumber(value: number): string { return new Intl.NumberFormat("zh-CN").format(value); }
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? `${minutes} 分 ${seconds % 60} 秒` : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
 }
 
 function fileChangeKind(kind: string | { type?: string }): string {

@@ -8,6 +8,8 @@
 - 任务列表、创建、恢复和完整历史读取
 - 原生 Codex Project 管理；未归属任务按工作目录自动分组
 - Thread Fork、`/fork`/`/side` 命令和并行侧边聊天
+- 原生持久目标（描述、状态、Token 预算、用量和耗时）及 ChatGPT 风格完成胶囊
+- 对话搜索、重命名、归档；回复复制与有用/无用反馈
 - 实时 assistant delta、命令输出、文件变更、计划和工具卡片
 - Unified diff、受限文件浏览、文本和图片预览
 - 发送后续指令、选择模型/推理强度、中断正在执行的 turn
@@ -71,7 +73,7 @@ npm run protocol:generate
 
 ## 本机真实 E2E
 
-服务启动后运行以下命令。测试会连接当前 WebSocket Bridge，读取真实 Project/thread/文件，创建 ephemeral fork，并通过本机 Codex 完成一个最小 turn：
+服务启动后运行以下命令。测试会连接当前 WebSocket Bridge，读取真实 Project/thread/文件，创建并最终归档测试 fork，通过本机 Codex 完成一个最小 turn，并验证 Goal set/get/clear：
 
 ```bash
 npm run e2e:local

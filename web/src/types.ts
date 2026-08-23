@@ -60,3 +60,14 @@ export interface ServerRequest {
 }
 
 export type ConnectionState = "connecting" | "ready" | "closed" | "error";
+
+export interface ThreadGoal {
+  threadId: string;
+  objective: string;
+  status: "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited" | "complete";
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
