@@ -1,9 +1,9 @@
 import { timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { createServer } from "node:http";
-import { homedir } from "node:os";
-import { dirname, extname, relative, resolve, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocket, WebSocketServer } from "ws";
@@ -19,6 +19,9 @@ const configuredAppServerUrl = process.env.CODEX_APP_SERVER_URL;
 const codexHome = process.env.CODEX_HOME ?? resolve(homedir(), ".codex");
 const daemonSocket = resolve(codexHome, "app-server-control/app-server-control.sock");
 const appServerUrl = configuredAppServerUrl ?? (existsSync(daemonSocket) ? `unix://${daemonSocket}` : undefined);
+const chatWorkspaceRoot = resolve(tmpdir(), "codex-remote-chat-workspaces");
+const bridgeVersion = "0.2.0";
+const bridgeCapabilities = ["bridge/session/start", "bridge/fs/readDirectory", "bridge/fs/readFile"];
 
 if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1" && token.length < 24) {
   throw new Error("REMOTE_WEB_TOKEN must contain at least 24 characters when HOST is not loopback");
@@ -58,7 +61,7 @@ appServer.on("stderr", (value) => process.stderr.write(`[app-server] ${value}`))
 const app = express();
 app.disable("x-powered-by");
 app.get("/api/health", (_request, response) => {
-  response.json({ ok: true, appServer: Boolean(appServer.initialized) });
+  response.json({ ok: true, version: bridgeVersion, capabilities: bridgeCapabilities, appServer: Boolean(appServer.initialized) });
 });
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -115,6 +118,15 @@ wss.on("connection", (ws) => {
     }
 
     if (message.type === "rpc") {
+      if (message.method === "bridge/session/start") {
+        try {
+          const result = await startChatSession(message.params);
+          send(ws, { type: "rpcResult", id: message.id, result });
+        } catch (error) {
+          send(ws, { type: "rpcResult", id: message.id, error: { message: error instanceof Error ? error.message : String(error) } });
+        }
+        return;
+      }
       if (message.method.startsWith("bridge/fs/")) {
         try {
           const result = await handleFileRpc(message.method, message.params);
@@ -169,7 +181,7 @@ heartbeat.unref();
 
 function finishAuth(ws: WebSocket): void {
   sockets.add(ws);
-  send(ws, { type: "ready", version: "0.1.0", initialized: appServer.initialized });
+  send(ws, { type: "ready", version: bridgeVersion, capabilities: bridgeCapabilities, initialized: appServer.initialized });
 }
 
 function safeTokenEqual(expected: string, actual: string): boolean {
@@ -184,6 +196,19 @@ function send(ws: WebSocket, message: BridgeMessage): void {
 
 function broadcast(message: BridgeMessage): void {
   for (const ws of sockets) send(ws, message);
+}
+
+async function startChatSession(params: unknown): Promise<unknown> {
+  const input = (params ?? {}) as Record<string, unknown>;
+  await mkdir(chatWorkspaceRoot, { recursive: true, mode: 0o700 });
+  const cwd = await mkdtemp(join(chatWorkspaceRoot, "session-"));
+  const threadParams: Record<string, unknown> = {
+    cwd,
+    approvalPolicy: "on-request",
+    sandbox: "workspace-write",
+  };
+  if (typeof input.model === "string" && input.model) threadParams.model = input.model;
+  return appServer.request("thread/start", threadParams);
 }
 
 async function handleFileRpc(method: string, params: unknown): Promise<unknown> {

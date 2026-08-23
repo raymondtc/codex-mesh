@@ -25,7 +25,7 @@ export type BrowserMessage =
   | { type: "serverResponse"; id: number | string; result?: unknown; error?: { message: string } };
 
 export type BridgeMessage =
-  | { type: "ready"; version: string; initialized: unknown }
+  | { type: "ready"; version: string; capabilities: string[]; initialized: unknown }
   | { type: "rpcResult"; id: string; result?: unknown; error?: { message: string; data?: unknown } }
   | { type: "event"; method: string; params?: unknown }
   | { type: "serverRequest"; id: number | string; method: string; params?: unknown }

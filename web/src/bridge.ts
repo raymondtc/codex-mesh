@@ -17,6 +17,7 @@ export class BridgeClient {
   private shouldReconnect = false;
   private reconnectAttempts = 0;
   private reconnectTimer?: number;
+  private capabilities = new Set<string>();
   onEvent?: EventHandler;
   onState?: StateHandler;
   onServerRequest?: RequestHandler;
@@ -44,6 +45,7 @@ export class BridgeClient {
     socket.addEventListener("message", (event) => {
       const message = JSON.parse(String(event.data)) as Record<string, unknown>;
       if (message.type === "ready") {
+        this.capabilities = new Set(Array.isArray(message.capabilities) ? message.capabilities.filter((value): value is string => typeof value === "string") : []);
         this.reconnectAttempts = 0;
         this.onState?.("ready");
         return;
@@ -99,10 +101,15 @@ export class BridgeClient {
 
   disconnect(): void {
     this.shouldReconnect = false;
+    this.capabilities.clear();
     window.clearTimeout(this.reconnectTimer);
     const socket = this.socket;
     this.socket = undefined;
     socket?.close();
+  }
+
+  supports(capability: string): boolean {
+    return this.capabilities.has(capability);
   }
 
   call<T>(method: string, params?: unknown): Promise<T> {

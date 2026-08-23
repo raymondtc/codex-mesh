@@ -5,13 +5,14 @@
 ## 已实现
 
 - 优先连接本机 Codex daemon，共享已加载线程；不可用时启动 `codex app-server --stdio`
-- 任务列表、创建、恢复和完整历史读取
-- 原生 Codex Project 管理；未归属任务按工作目录自动分组
-- Thread Fork、`/fork`/`/side` 命令和并行侧边聊天
+- 任务列表、创建、恢复和完整历史读取；支持不关联项目的隔离聊天 Session
+- 原生 Codex Project 管理；未归属任务按工作目录自动分组，项目与目录可折叠及快捷新建
+- 会话列表快捷 Fork、`/fork`/`/side` 命令和并行侧边聊天
 - 原生持久目标（描述、状态、Token 预算、用量和耗时）及 ChatGPT 风格完成胶囊
-- 对话搜索、重命名、归档；回复复制与有用/无用反馈
-- 实时 assistant delta、命令输出、文件变更、计划和工具卡片
-- Unified diff、受限文件浏览、文本和图片预览
+- 每个会话使用独立 `/thread/{id}` 地址，支持刷新恢复及浏览器前进/后退
+- 对话搜索、重命名、归档与回复复制；用户消息支持发送中、成功和失败状态
+- 实时 assistant delta、Codex 工作状态、命令输出、文件变更、计划和工具卡片
+- Unified diff、受限文件浏览、Agent 本地文件链接、语法高亮文本预览和图片放大
 - 发送后续指令、选择模型/推理强度、中断正在执行的 turn
 - 命令与文件变更审批，以及 `request_user_input` 问答
 - 共享 Token 鉴权、WebSocket 负载限制、app-server RPC 白名单
@@ -73,7 +74,7 @@ npm run protocol:generate
 
 ## 本机真实 E2E
 
-服务启动后运行以下命令。测试会连接当前 WebSocket Bridge，读取真实 Project/thread/文件，创建并最终归档测试 fork，通过本机 Codex 完成一个最小 turn，并验证 Goal set/get/clear：
+服务启动后运行以下命令。测试会连接当前 WebSocket Bridge，读取真实 Project/thread/文件，验证隔离聊天 Session，并创建及归档测试 fork，通过本机 Codex 完成一个最小 turn，再验证 Goal set/get/clear：
 
 ```bash
 npm run e2e:local

@@ -16,6 +16,7 @@ let nextId = 0;
 const pending = new Map();
 const turnWaiters = new Map();
 const streamedText = new Map();
+const deliveredUserMessages = new Map();
 
 function call(method, params) {
   return new Promise((resolveCall, rejectCall) => {
@@ -36,9 +37,13 @@ const ready = new Promise((resolveReady, rejectReady) => {
   socket.once("open", () => socket.send(JSON.stringify({ type: "auth", token })));
   socket.on("message", (raw) => {
     const message = JSON.parse(String(raw));
-    if (message.type === "ready") resolveReady();
+    if (message.type === "ready") resolveReady(message);
     if (message.type === "event") {
       const threadId = message.params?.threadId;
+      if (message.method === "item/started" && threadId && message.params?.item?.type === "userMessage") {
+        const text = message.params.item.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") ?? "";
+        deliveredUserMessages.set(threadId, text);
+      }
       if (message.method === "item/agentMessage/delta" && threadId) streamedText.set(threadId, (streamedText.get(threadId) ?? "") + (message.params.delta ?? ""));
       if (message.method === "turn/completed" && threadId) {
         const turnId = message.params?.turn?.id;
@@ -61,7 +66,10 @@ const ready = new Promise((resolveReady, rejectReady) => {
 });
 
 async function main() {
-  await ready;
+  const bridgeInfo = await ready;
+  if (!bridgeInfo.capabilities?.includes("bridge/session/start")) {
+    throw new Error(`Running bridge at ${url} is stale: ${bridgeInfo.version ?? "unknown"} does not expose bridge/session/start`);
+  }
   const listedProjects = await call("project/list", { limit: 100 });
   let project = listedProjects.data.find((item) => item.roots.some((root) => root.path === projectRoot));
   if (!project) {
@@ -81,6 +89,14 @@ async function main() {
       ?? listedThreads.data.find((thread) => thread.projectId === project.id && thread.status?.type !== "active");
   if (!source) throw new Error("No non-active source thread found; set E2E_THREAD_ID to a completed local thread");
 
+  const routeUrl = new URL(`/thread/${encodeURIComponent(source.id)}`, url);
+  routeUrl.protocol = routeUrl.protocol === "wss:" ? "https:" : "http:";
+  const routeResponse = await fetch(routeUrl);
+  const routeHtml = await routeResponse.text();
+  if (!routeResponse.ok || !routeResponse.headers.get("content-type")?.includes("text/html") || !routeHtml.includes('<div id="root"></div>')) {
+    throw new Error("Per-thread deep-link route E2E failed");
+  }
+
   const projectRelativeRoot = relative(source.cwd, projectRoot) || ".";
   const readmePath = projectRelativeRoot === "." ? "README.md" : `${projectRelativeRoot}/README.md`;
   const iconPath = projectRelativeRoot === "." ? "web/public/icon.svg" : `${projectRelativeRoot}/web/public/icon.svg`;
@@ -97,6 +113,10 @@ async function main() {
   if (readme.kind !== "text" || !readme.content.startsWith("# Codex Remote Web")) throw new Error("Text preview E2E failed");
   if (image.kind !== "image" || !image.dataUrl.startsWith("data:image/svg+xml;base64,")) throw new Error("Image preview E2E failed");
   if (!traversalBlocked) throw new Error("File traversal guard E2E failed");
+
+  const chatSession = (await call("bridge/session/start", {})).thread;
+  const isolatedChat = chatSession.cwd.split(/[\\/]/).includes("codex-remote-chat-workspaces") && !chatSession.projectId;
+  if (!isolatedChat) throw new Error("Isolated chat session E2E failed");
 
   let forkResult = null;
   let goalResult = null;
@@ -118,6 +138,11 @@ async function main() {
       turnWaiters.set(key, { resolve: resolveTurn, timer });
     });
     if (completed.status !== "completed" || !completed.assistant.includes(marker)) throw new Error("Fork/turn E2E failed");
+    if (!deliveredUserMessages.get(fork.id)?.includes(marker)) throw new Error("User-message delivery event E2E failed");
+    const persistedThread = (await call("thread/read", { threadId: fork.id, includeTurns: true })).thread;
+    const persistedTurn = persistedThread.turns.find((item) => item.id === turn.id);
+    const persistedUserText = persistedTurn?.items.filter((item) => item.type === "userMessage").flatMap((item) => item.content ?? []).filter((part) => part.type === "text").map((part) => part.text).join("\n") ?? "";
+    if (!persistedUserText.includes(marker)) throw new Error("Persisted user-message E2E failed");
     const objective = `E2E goal ${marker}`;
     const goal = (await call("thread/goal/set", { threadId: fork.id, objective, status: "active", tokenBudget: 1000 })).goal;
     const readGoal = (await call("thread/goal/get", { threadId: fork.id })).goal;
@@ -125,14 +150,17 @@ async function main() {
     const cleared = await call("thread/goal/clear", { threadId: fork.id });
     if (!cleared.cleared || (await call("thread/goal/get", { threadId: fork.id })).goal !== null) throw new Error("Goal clear E2E failed");
     goalResult = { objective, tokenBudget: goal.tokenBudget, setGetClear: true };
-    forkResult = { threadId: fork.id, forkedFromId: fork.forkedFromId, turnId: turn.id, status: completed.status, marker };
+    forkResult = { threadId: fork.id, forkedFromId: fork.forkedFromId, turnId: turn.id, status: completed.status, marker, userMessageDelivered: true, userMessagePersisted: true };
     await call("thread/archive", { threadId: fork.id });
   }
 
   console.log(JSON.stringify({
     ok: true,
+    bridge: { url, version: bridgeInfo.version, capabilities: bridgeInfo.capabilities },
     project: { id: project.id, name: project.name, root: project.roots[0]?.path },
     sourceThreadId: source.id,
+    route: { path: routeUrl.pathname, deepLink: true },
+    chat: { threadId: chatSession.id, isolated: true },
     files: { entries: directory.entries.length, text: readme.path, image: image.path, traversalBlocked },
     fork: forkResult,
     goal: goalResult,

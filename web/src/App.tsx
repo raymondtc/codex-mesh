@@ -6,7 +6,9 @@ import {
   ArrowLeft,
   Bot,
   Check,
+  ChevronDown,
   ChevronLeft,
+  ChevronRight,
   CircleStop,
   Command,
   FolderGit2,
@@ -15,7 +17,9 @@ import {
   GitFork,
   KeyRound,
   Image,
+  LoaderCircle,
   Menu,
+  MessageCircle,
   Pencil,
   MessageSquarePlus,
   PanelRightOpen,
@@ -23,18 +27,18 @@ import {
   RefreshCw,
   Search,
   Target,
-  ThumbsDown,
-  ThumbsUp,
   Trash2,
   Send,
   ShieldAlert,
   TerminalSquare,
   X,
+  ZoomIn,
 } from "lucide-react";
+import { Highlight, themes, type Language } from "prism-react-renderer";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { BridgeClient } from "./bridge";
-import type { ConnectionState, JsonObject, Project, ServerRequest, Thread, ThreadGoal, ThreadItem } from "./types";
+import type { ConnectionState, JsonObject, Project, ServerRequest, Thread, ThreadGoal, ThreadItem, Turn } from "./types";
 
 interface ModelInfo {
   id: string;
@@ -62,6 +66,32 @@ interface FilePreview {
 }
 
 const STORED_TOKEN = "codex-remote-token";
+const COLLAPSED_GROUPS_KEY = "codex-remote-collapsed-groups";
+const CHAT_WORKSPACE_SEGMENT = "codex-remote-chat-workspaces";
+
+interface ThreadGroup {
+  id: string;
+  name: string;
+  threads: Thread[];
+  position: number;
+  kind: "chat" | "project" | "directory";
+  root?: string;
+  projectId?: string;
+}
+
+interface OptimisticMessage {
+  id: string;
+  threadId: string;
+  text: string;
+  state: "sending" | "sent" | "failed";
+  turnId?: string;
+  error?: string;
+}
+
+interface ZoomedImage {
+  src: string;
+  alt: string;
+}
 
 export default function App() {
   const bridge = useMemo(() => new BridgeClient(), []);
@@ -84,6 +114,10 @@ export default function App() {
   const [sideLiveText, setSideLiveText] = useState("");
   const [sideDraft, setSideDraft] = useState("");
   const [sideBusy, setSideBusy] = useState(false);
+  const [optimisticMessages, setOptimisticMessages] = useState<OptimisticMessage[]>([]);
+  const [activeTurns, setActiveTurns] = useState<Record<string, string>>({});
+  const [activityLabels, setActivityLabels] = useState<Record<string, string>>({});
+  const [zoomedImage, setZoomedImage] = useState<ZoomedImage | null>(null);
   const [showFiles, setShowFiles] = useState(false);
   const [fileThreadId, setFileThreadId] = useState("");
   const [filePath, setFilePath] = useState(".");
@@ -105,7 +139,18 @@ export default function App() {
   const [goalObjective, setGoalObjective] = useState("");
   const [goalBudget, setGoalBudget] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(COLLAPSED_GROUPS_KEY) ?? "[]") as unknown;
+      return new Set(Array.isArray(stored) ? stored.filter((value): value is string => typeof value === "string") : []);
+    } catch {
+      return new Set();
+    }
+  });
   const refreshTimer = useRef<number | undefined>(undefined);
+  const threadsRef = useRef<Thread[]>([]);
+  const timelineRef = useRef<HTMLElement | null>(null);
+  const sideTimelineRef = useRef<HTMLElement | null>(null);
 
   const loadThreads = useCallback(async () => {
     const result = await bridge.call<{ data: Thread[] }>("thread/list", {
@@ -113,7 +158,9 @@ export default function App() {
       sortKey: "updated_at",
       sortDirection: "desc",
     });
+    threadsRef.current = result.data;
     setThreads(result.data);
+    return result.data;
   }, [bridge]);
 
   const loadProjects = useCallback(async () => {
@@ -128,6 +175,8 @@ export default function App() {
       const result = await bridge.call<{ thread: Thread }>("thread/read", { threadId, includeTurns: true });
       setSelected(result.thread);
       setThreads((current) => current.map((thread) => (thread.id === result.thread.id ? result.thread : thread)));
+      reconcileOptimisticMessage(result.thread, setOptimisticMessages);
+      return result.thread;
     } catch {
       // The thread can be briefly unavailable while app-server is committing a turn.
     }
@@ -139,6 +188,8 @@ export default function App() {
     try {
       const result = await bridge.call<{ thread: Thread }>("thread/read", { threadId, includeTurns: true });
       setSideThread(result.thread);
+      reconcileOptimisticMessage(result.thread, setOptimisticMessages);
+      return result.thread;
     } catch {
       // A side thread can be briefly unavailable while its turn is being committed.
     }
@@ -171,7 +222,18 @@ export default function App() {
               setEffort(initial.defaultReasoningEffort);
             }
           }),
-        ]).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+        ]).then(([loadedThreads]) => {
+          const routeThreadId = threadIdFromLocation();
+          if (!routeThreadId || routeThreadId === selectedIdRef.current) return;
+          const routeThread = loadedThreads.find((thread) => thread.id === routeThreadId);
+          if (routeThread) void selectThread(routeThread, "none");
+          else void bridge.call<{ thread: Thread }>("thread/read", { threadId: routeThreadId, includeTurns: false })
+            .then((result) => selectThread(result.thread, "none"))
+            .catch(() => {
+              window.history.replaceState(null, "", "/");
+              setError("地址中的会话不存在或已不可用");
+            });
+        }).catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
       }
     };
 
@@ -187,17 +249,45 @@ export default function App() {
         else if (event.delta && event.threadId === selectedIdRef.current) setLiveText((current) => current + event.delta);
       }
       if (method === "turn/started") {
-        const threadId = (params as { threadId?: string }).threadId;
+        const event = params as { threadId?: string; turn?: Turn };
+        const threadId = event.threadId;
+        if (threadId) {
+          setActiveTurns((current) => ({ ...current, [threadId]: event.turn?.id ?? current[threadId] ?? "" }));
+          setActivityLabels((current) => ({ ...current, [threadId]: "Codex 正在思考" }));
+        }
         if (threadId === sideThreadIdRef.current) setSideLiveText("");
         if (threadId === selectedIdRef.current) setLiveText("");
+      }
+      if (method === "item/started") {
+        const event = params as { threadId?: string; item?: ThreadItem };
+        if (event.threadId) {
+          setActivityLabels((current) => ({ ...current, [event.threadId as string]: activityLabel(event.item) }));
+          if (event.item?.type === "userMessage") {
+            if (event.threadId === selectedIdRef.current) void refreshSelected();
+            if (event.threadId === sideThreadIdRef.current) void refreshSideThread();
+          }
+        }
       }
       if (method === "item/completed") {
         const event = params as { threadId?: string; item?: ThreadItem };
         if (event.item?.type === "agentMessage" && event.threadId === sideThreadIdRef.current) setSideLiveText("");
         if (event.item?.type === "agentMessage" && event.threadId === selectedIdRef.current) setLiveText("");
+        if (event.threadId) setActivityLabels((current) => ({ ...current, [event.threadId as string]: "Codex 正在继续处理" }));
       }
       if (method === "turn/completed" || method === "item/completed") {
         const threadId = (params as { threadId?: string }).threadId;
+        if (method === "turn/completed" && threadId) {
+          setActiveTurns((current) => {
+            const next = { ...current };
+            delete next[threadId];
+            return next;
+          });
+          setActivityLabels((current) => {
+            const next = { ...current };
+            delete next[threadId];
+            return next;
+          });
+        }
         window.clearTimeout(refreshTimer.current);
         refreshTimer.current = window.setTimeout(() => {
           if (threadId === selectedIdRef.current) void refreshSelected();
@@ -219,17 +309,35 @@ export default function App() {
       setRequests((current) => [...current.filter((item) => item.id !== request.id), request]);
     };
 
+    const handleHistoryNavigation = () => {
+      const threadId = threadIdFromLocation();
+      if (!threadId) {
+        selectedIdRef.current = null;
+        setSelected(null);
+        setGoal(null);
+        return;
+      }
+      const thread = threadsRef.current.find((item) => item.id === threadId);
+      if (thread) void selectThread(thread, "none");
+      else void bridge.call<{ thread: Thread }>("thread/read", { threadId, includeTurns: false })
+        .then((result) => selectThread(result.thread, "none"))
+        .catch(() => setError("无法打开历史地址中的会话"));
+    };
+    window.addEventListener("popstate", handleHistoryNavigation);
+
     bridge.connect(token);
     return () => {
       window.clearTimeout(refreshTimer.current);
+      window.removeEventListener("popstate", handleHistoryNavigation);
       bridge.disconnect();
     };
   }, [bridge, loadProjects, loadThreads, refreshSelected, refreshSideThread, token]);
 
-  async function selectThread(thread: Thread) {
+  async function selectThread(thread: Thread, routeMode: "push" | "replace" | "none" = "push") {
     setSidebarOpen(false);
     setError("");
     selectedIdRef.current = thread.id;
+    if (routeMode !== "none") setThreadRoute(thread.id, routeMode);
     setGoal(null);
     setSelected({ ...thread, turns: thread.turns ?? [] });
     try {
@@ -267,14 +375,67 @@ export default function App() {
     if (!selected) return;
     const name = window.prompt("输入新的对话名称", selected.name || selected.preview || "");
     if (!name?.trim()) return;
+    if (!isThreadStarted(selected)) {
+      setSelected({ ...selected, name: name.trim() });
+      return;
+    }
     await bridge.call("thread/name/set", { threadId: selected.id, name: name.trim() });
     setSelected({ ...selected, name: name.trim() }); await loadThreads();
   }
 
   async function archiveThread() {
-    if (!selected || !window.confirm("归档当前对话？")) return;
+    if (!selected) return;
+    if (!isThreadStarted(selected)) {
+      selectedIdRef.current = null; setSelected(null); setGoal(null); setThreadRoute(null, "push");
+      return;
+    }
+    if (!window.confirm("归档当前对话？")) return;
     await bridge.call("thread/archive", { threadId: selected.id });
-    selectedIdRef.current = null; setSelected(null); setGoal(null); await loadThreads();
+    selectedIdRef.current = null; setSelected(null); setGoal(null); setThreadRoute(null, "push"); await loadThreads();
+  }
+
+  function openNewThread(cwd = "", projectId = "") {
+    setNewCwd(cwd);
+    setNewProjectId(projectId);
+    setShowNewThread(true);
+  }
+
+  function toggleGroup(groupId: string) {
+    setCollapsedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      localStorage.setItem(COLLAPSED_GROUPS_KEY, JSON.stringify([...next]));
+      return next;
+    });
+  }
+
+  async function createChatSession() {
+    if (busy) return;
+    if (!bridge.supports("bridge/session/start")) {
+      setError("当前服务端版本过旧，不支持新建聊天。请重启服务以加载最新构建。");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const result = await bridge.call<{ thread: Thread }>("bridge/session/start", {
+        ...(model ? { model } : {}),
+        approvalPolicy: "on-request",
+        sandbox: "workspace-write",
+      });
+      selectedIdRef.current = result.thread.id;
+      setThreadRoute(result.thread.id, "push");
+      setSelected({ ...result.thread, name: result.thread.name ?? "新聊天" });
+      setGoal(null);
+      setLiveText("");
+      setSidebarOpen(false);
+      await loadThreads();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function createThread() {
@@ -290,6 +451,7 @@ export default function App() {
         sandbox: "workspace-write",
       });
       selectedIdRef.current = result.thread.id;
+      setThreadRoute(result.thread.id, "push");
       setSelected(result.thread);
       setShowNewThread(false);
       await loadThreads();
@@ -337,22 +499,24 @@ export default function App() {
     }
   }
 
-  async function forkThread(openBeside = false) {
-    if (!selected || busy) return;
+  async function forkThread(source: Thread | null = selected, openBeside = false) {
+    if (!source || busy) return;
     setBusy(true);
     setError("");
     try {
-      const result = await bridge.call<{ thread: Thread }>("thread/fork", { threadId: selected.id });
+      const result = await bridge.call<{ thread: Thread }>("thread/fork", { threadId: source.id });
       if (openBeside) {
         sideThreadIdRef.current = result.thread.id;
-        const sideName = `${selected.name || selected.preview || "任务"} · 侧聊`;
+        const sideName = `${source.name || source.preview || "任务"} · 侧聊`;
         setSideThread({ ...result.thread, name: sideName });
         setSideLiveText("");
         await bridge.call("thread/name/set", { threadId: result.thread.id, name: sideName });
       } else {
         selectedIdRef.current = result.thread.id;
+        setThreadRoute(result.thread.id, "push");
         setSelected(result.thread);
         setLiveText("");
+        setSidebarOpen(false);
       }
       await loadThreads();
     } catch (reason) {
@@ -367,18 +531,17 @@ export default function App() {
     const message = draft.trim();
     if (message === "/fork") {
       setDraft("");
-      await forkThread();
+      await forkThread(selected);
       return;
     }
     if (message === "/side") {
       setDraft("");
-      await forkThread(true);
+      await forkThread(selected, true);
       return;
     }
     if (message === "/new") {
       setDraft("");
-      setNewCwd(selected.cwd);
-      setShowNewThread(true);
+      openNewThread(selected.cwd, selected.projectId ?? "");
       return;
     }
     if (message === "/project") {
@@ -387,21 +550,33 @@ export default function App() {
       setShowNewProject(true);
       return;
     }
+    const optimisticId = crypto.randomUUID();
     setDraft("");
     setBusy(true);
     setLiveText("");
     setError("");
+    setOptimisticMessages((current) => [...current, { id: optimisticId, threadId: selected.id, text: message, state: "sending" }]);
+    setActivityLabels((current) => ({ ...current, [selected.id]: "正在发送消息" }));
     try {
-      await bridge.call("turn/start", {
+      const result = await bridge.call<{ turn: Turn }>("turn/start", {
         threadId: selected.id,
         input: [{ type: "text", text: message, text_elements: [] }],
         ...(model ? { model } : {}),
         effort,
       });
+      setOptimisticMessages((current) => current.map((item) => item.id === optimisticId ? { ...item, state: "sent", turnId: result.turn.id } : item));
+      setActiveTurns((current) => ({ ...current, [selected.id]: result.turn.id }));
+      setActivityLabels((current) => ({ ...current, [selected.id]: "Codex 正在思考" }));
       await refreshSelected();
     } catch (reason) {
-      setDraft(message);
-      setError(reason instanceof Error ? reason.message : String(reason));
+      const messageText = reason instanceof Error ? reason.message : String(reason);
+      setOptimisticMessages((current) => current.map((item) => item.id === optimisticId ? { ...item, state: "failed", error: messageText } : item));
+      setActivityLabels((current) => {
+        const next = { ...current };
+        delete next[selected.id];
+        return next;
+      });
+      setError(messageText);
     } finally {
       setBusy(false);
     }
@@ -410,24 +585,42 @@ export default function App() {
   async function sendSideTurn() {
     if (!sideThread || !sideDraft.trim() || sideBusy) return;
     const message = sideDraft.trim();
+    const optimisticId = crypto.randomUUID();
     setSideDraft("");
     setSideBusy(true);
     setSideLiveText("");
     setError("");
+    setOptimisticMessages((current) => [...current, { id: optimisticId, threadId: sideThread.id, text: message, state: "sending" }]);
+    setActivityLabels((current) => ({ ...current, [sideThread.id]: "正在发送消息" }));
     try {
-      await bridge.call("turn/start", {
+      const result = await bridge.call<{ turn: Turn }>("turn/start", {
         threadId: sideThread.id,
         input: [{ type: "text", text: message, text_elements: [] }],
         ...(model ? { model } : {}),
         effort,
       });
+      setOptimisticMessages((current) => current.map((item) => item.id === optimisticId ? { ...item, state: "sent", turnId: result.turn.id } : item));
+      setActiveTurns((current) => ({ ...current, [sideThread.id]: result.turn.id }));
+      setActivityLabels((current) => ({ ...current, [sideThread.id]: "Codex 正在思考" }));
       await refreshSideThread();
     } catch (reason) {
-      setSideDraft(message);
-      setError(reason instanceof Error ? reason.message : String(reason));
+      const messageText = reason instanceof Error ? reason.message : String(reason);
+      setOptimisticMessages((current) => current.map((item) => item.id === optimisticId ? { ...item, state: "failed", error: messageText } : item));
+      setActivityLabels((current) => {
+        const next = { ...current };
+        delete next[sideThread.id];
+        return next;
+      });
+      setError(messageText);
     } finally {
       setSideBusy(false);
     }
+  }
+
+  function editFailedMessage(message: OptimisticMessage, side = false) {
+    if (side) setSideDraft(message.text);
+    else setDraft(message.text);
+    setOptimisticMessages((current) => current.filter((item) => item.id !== message.id));
   }
 
   function closeSideThread() {
@@ -472,8 +665,9 @@ export default function App() {
   async function interruptTurn() {
     if (!selected) return;
     const activeTurn = [...(selected.turns ?? [])].reverse().find((turn) => turn.status === "inProgress");
-    if (!activeTurn) return;
-    await bridge.call("turn/interrupt", { threadId: selected.id, turnId: activeTurn.id });
+    const turnId = activeTurn?.id ?? activeTurns[selected.id];
+    if (!turnId) return;
+    await bridge.call("turn/interrupt", { threadId: selected.id, turnId });
   }
 
   function saveToken(event: React.FormEvent) {
@@ -496,6 +690,32 @@ export default function App() {
     setRequests((current) => current.filter((item) => item.id !== request.id));
   }
 
+  const selectedOptimistic = selected ? optimisticMessages.filter((message) => message.threadId === selected.id) : [];
+  const sideOptimistic = sideThread ? optimisticMessages.filter((message) => message.threadId === sideThread.id) : [];
+  const selectedSending = selectedOptimistic.some((message) => message.state === "sending");
+  const sideSending = sideOptimistic.some((message) => message.state === "sending");
+  const selectedRunning = Boolean(selected && (isThreadActive(selected) || activeTurns[selected.id] !== undefined || selectedSending));
+  const sideRunning = Boolean(sideThread && (isThreadActive(sideThread) || activeTurns[sideThread.id] !== undefined || sideSending));
+
+  useEffect(() => {
+    const timeline = timelineRef.current;
+    if (timeline) timeline.scrollTo({ top: timeline.scrollHeight, behavior: "smooth" });
+  }, [selected?.id, selected?.turns, selectedOptimistic.length, liveText, selectedRunning]);
+
+  useEffect(() => {
+    const timeline = sideTimelineRef.current;
+    if (timeline) timeline.scrollTo({ top: timeline.scrollHeight, behavior: "smooth" });
+  }, [sideThread?.id, sideThread?.turns, sideOptimistic.length, sideLiveText, sideRunning]);
+
+  useEffect(() => { threadsRef.current = threads; }, [threads]);
+
+  useEffect(() => {
+    if (!zoomedImage) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setZoomedImage(null); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [zoomedImage]);
+
   if (connection !== "ready" && !hasConnected) {
     return (
       <main className="connect-page">
@@ -516,9 +736,11 @@ export default function App() {
     );
   }
 
-  const running = selected ? isThreadActive(selected) : false;
+  const running = selectedRunning;
   const visibleThreads = threads.filter((thread) => !searchQuery.trim() || `${thread.name ?? ""} ${thread.preview} ${thread.cwd}`.toLowerCase().includes(searchQuery.toLowerCase()));
-  const threadGroups = groupThreads(visibleThreads, projects);
+  const threadGroups = groupThreads(visibleThreads, projects).filter((group) => !searchQuery.trim() || group.threads.length > 0);
+  const selectedIsChat = selected ? isChatThread(selected) : false;
+  const selectedStarted = selected ? isThreadStarted(selected) : false;
 
   return (
     <div className={`app-shell ${sideThread ? "with-side-chat" : ""}`}>
@@ -527,20 +749,40 @@ export default function App() {
           <div className="brand"><span className="brand-mark small"><Command size={18} /></span><span>Codex Remote</span></div>
           <button className="icon-button mobile-only" onClick={() => setSidebarOpen(false)} aria-label="关闭侧边栏"><X size={19} /></button>
         </header>
-        <div className="sidebar-create"><button className="new-thread" onClick={() => setShowNewThread(true)}><MessageSquarePlus size={17} /> 新建任务</button><button className="project-button" onClick={() => { setProjectRoot(selected?.cwd ?? newCwd); setShowNewProject(true); }}><Plus size={15} /> 项目</button></div>
+        <div className="sidebar-create">
+          <button className="new-chat" disabled={busy} onClick={() => void createChatSession()}><MessageCircle size={17} /> 新建聊天</button>
+          <button className="task-button" onClick={() => openNewThread()}><MessageSquarePlus size={15} /> 新建任务</button>
+          <button className="project-button" onClick={() => { setProjectRoot(selected && !selectedIsChat ? selected.cwd : newCwd); setShowNewProject(true); }}><Plus size={15} /> 新建项目</button>
+        </div>
         <label className="thread-search"><Search size={14} /><input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="搜索对话" /></label>
         <div className="thread-list">
           <div className="section-label"><span>项目与任务</span><button className="icon-button" onClick={() => { void loadProjects(); void loadThreads(); }} aria-label="刷新"><RefreshCw size={14} /></button></div>
-          {threadGroups.map((group) => <section className="project-group" key={group.id}><div className="project-heading"><FolderGit2 size={13} /><strong>{group.name}</strong><span>{group.threads.length}</span></div>{group.threads.map((thread) => (
-              <button key={thread.id} className={`thread-row ${selected?.id === thread.id ? "active" : ""}`} onClick={() => void selectThread(thread)}>
-                <span className={`status-dot ${isThreadActive(thread) ? "running" : ""}`} />
-                <span className="thread-copy">
-                  <strong>{thread.name || thread.preview || "新任务"}</strong>
-                  <small>{thread.forkedFromId && <GitFork size={11} />} {shortPath(thread.cwd)}</small>
-                </span>
-                <time>{relativeTime(thread.updatedAt)}</time>
-              </button>
-            ))}</section>)}
+          {threadGroups.map((group) => {
+            const collapsed = !searchQuery.trim() && collapsedGroups.has(group.id);
+            return <section className={`project-group ${collapsed ? "collapsed" : ""}`} key={group.id}>
+              <div className="project-heading">
+                <button className="project-toggle" onClick={() => toggleGroup(group.id)} aria-expanded={!collapsed} aria-label={`${collapsed ? "展开" : "折叠"}${group.name}`}>
+                  {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+                  {group.kind === "chat" ? <MessageCircle size={13} /> : <FolderGit2 size={13} />}
+                  <strong>{group.name}</strong><span>{group.threads.length}</span>
+                </button>
+                <button className="group-create" disabled={busy} onClick={() => group.kind === "chat" ? void createChatSession() : openNewThread(group.root ?? "", group.projectId ?? "")} title={group.kind === "chat" ? "新建聊天" : `在 ${group.name} 中新建任务`} aria-label={group.kind === "chat" ? "新建聊天" : `在 ${group.name} 中新建任务`}><Plus size={14} /></button>
+              </div>
+              {!collapsed && group.threads.map((thread) => (
+                <div key={thread.id} className={`thread-row ${selected?.id === thread.id ? "active" : ""}`}>
+                  <button className="thread-row-main" onClick={() => void selectThread(thread)}>
+                    <span className={`status-dot ${isThreadActive(thread) ? "running" : ""}`} />
+                    <span className="thread-copy">
+                      <strong>{thread.name || thread.preview || (isChatThread(thread) ? "新聊天" : "新任务")}</strong>
+                      <small>{thread.forkedFromId && <GitFork size={11} />} {isChatThread(thread) ? "独立聊天" : shortPath(thread.cwd)}</small>
+                    </span>
+                    <time>{relativeTime(thread.updatedAt)}</time>
+                  </button>
+                  <button className="thread-row-fork" disabled={busy || isThreadActive(thread)} onClick={() => void forkThread(thread)} title="Fork 会话" aria-label={`Fork ${thread.name || thread.preview || "会话"}`}><GitFork size={14} /></button>
+                </div>
+              ))}
+            </section>;
+          })}
           {!threads.length && <p className="empty-list">还没有 Codex 任务。</p>}
         </div>
         <footer className="sidebar-footer"><span><i className="online-dot" /> app-server 已连接</span><button onClick={changeToken}><KeyRound size={13} /> 更换 Token</button></footer>
@@ -553,16 +795,16 @@ export default function App() {
           <button className="icon-button mobile-only" onClick={() => setSidebarOpen(true)} aria-label="打开侧边栏"><Menu size={21} /></button>
           <div className="topbar-title">
             <strong>{selected?.name || selected?.preview || "选择一个任务"}</strong>
-            {selected && <small>{selected.cwd}</small>}
+            {selected && <small>{selectedIsChat ? "独立聊天 Session" : selected.cwd}</small>}
           </div>
-          {selected && <select className="project-select" value={selected.projectId ?? ""} onChange={(event) => void assignProject(event.target.value)} aria-label="所属项目"><option value="">按目录归类</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>}
-          {selected && <button className="icon-button" onClick={() => void browseFiles(selected.id)} aria-label="浏览项目文件" title="文件"><FolderOpen size={17} /></button>}
-          {selected && <button className={`icon-button ${goal ? "goal-active" : ""}`} onClick={() => { setGoalObjective(goal?.objective ?? ""); setGoalBudget(goal?.tokenBudget?.toString() ?? ""); setShowGoal(true); }} aria-label="目标" title="目标"><Target size={17} /></button>}
+          {selected && !selectedIsChat && <select className="project-select" value={selected.projectId ?? ""} onChange={(event) => void assignProject(event.target.value)} aria-label="所属项目"><option value="">按目录归类</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>}
+          {selected && !selectedIsChat && <button className="icon-button" onClick={() => void browseFiles(selected.id)} aria-label="浏览项目文件" title="文件"><FolderOpen size={17} /></button>}
+          {selected && selectedStarted && <button className={`icon-button ${goal ? "goal-active" : ""}`} onClick={() => { setGoalObjective(goal?.objective ?? ""); setGoalBudget(goal?.tokenBudget?.toString() ?? ""); setShowGoal(true); }} aria-label="目标" title="目标"><Target size={17} /></button>}
           {selected && <button className="icon-button" onClick={() => void renameThread()} aria-label="重命名" title="重命名"><Pencil size={16} /></button>}
           {selected && <button className="icon-button" onClick={() => void archiveThread()} aria-label="归档" title="归档"><Archive size={16} /></button>}
-          {selected && <button className="icon-button" onClick={() => void forkThread()} disabled={busy || running} aria-label="Fork 当前任务" title="Fork 当前任务"><GitFork size={17} /></button>}
-          {selected && <button className="icon-button" onClick={() => void forkThread(true)} disabled={busy || running || Boolean(sideThread)} aria-label="在侧边聊天中 Fork" title="侧边聊天"><PanelRightOpen size={17} /></button>}
-          {selected && <span className={`run-state ${running ? "running" : ""}`}>{running ? "执行中" : "就绪"}</span>}
+          {selected && <button className="icon-button" onClick={() => void forkThread(selected)} disabled={busy || running || !selectedStarted} aria-label="Fork 当前任务" title={selectedStarted ? "Fork 当前任务" : "发送第一条消息后可 Fork"}><GitFork size={17} /></button>}
+          {selected && <button className="icon-button" onClick={() => void forkThread(selected, true)} disabled={busy || running || Boolean(sideThread) || !selectedStarted} aria-label="在侧边聊天中 Fork" title={selectedStarted ? "侧边聊天" : "发送第一条消息后可 Fork"}><PanelRightOpen size={17} /></button>}
+          {selected && <span className={`run-state ${running ? "running" : ""}`}>{running && <LoaderCircle className="spin" size={12} />}{running ? "Codex 工作中" : "就绪"}</span>}
         </header>
 
         {connection !== "ready" && <div className="reconnect-banner"><RefreshCw size={15} /> {connectionMessage || "正在重新连接…"}</div>}
@@ -573,14 +815,16 @@ export default function App() {
             <div className="empty-icon"><Bot size={38} /></div>
             <h2>在任何屏幕上继续 Codex 任务</h2>
             <p>查看实时输出、发送后续指令，并在命令越过权限边界时进行审批。</p>
-            <button className="primary" onClick={() => setShowNewThread(true)}><MessageSquarePlus size={17} /> 新建任务</button>
+            <div className="empty-actions"><button className="primary" disabled={busy} onClick={() => void createChatSession()}><MessageCircle size={17} /> 新建聊天</button><button className="secondary" onClick={() => openNewThread()}><MessageSquarePlus size={17} /> 新建任务</button></div>
           </section>
         ) : (
           <>
-            <section className="timeline">
-              {(selected.turns ?? []).flatMap((turn) => turn.items ?? []).map((item, index) => <TimelineItem item={item} threadId={selected.id} openFile={previewFile} key={item.id ?? `${item.type}-${index}`} />)}
-              {liveText && <article className="timeline-item assistant live"><div className="avatar"><Bot size={17} /></div><div className="bubble markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{liveText}</ReactMarkdown><span className="cursor" /></div></article>}
-              {!selected.turns?.some((turn) => turn.items?.length) && !liveText && <div className="thread-empty"><Bot size={28} /><p>发送第一条指令开始这个任务。</p></div>}
+            <section className="timeline" ref={timelineRef}>
+              {(selected.turns ?? []).flatMap((turn) => turn.items ?? []).map((item, index) => <TimelineItem item={item} threadId={selected.id} openFile={previewFile} openImage={(src, alt) => setZoomedImage({ src, alt })} key={item.id ?? `${item.type}-${index}`} />)}
+              {selectedOptimistic.map((message) => <OptimisticUserMessage key={message.id} message={message} edit={() => editFailedMessage(message)} />)}
+              {liveText && <article className="timeline-item assistant live"><div className="avatar"><Bot size={17} /></div><div className="bubble markdown"><MarkdownContent text={liveText} threadId={selected.id} openFile={previewFile} openImage={(src, alt) => setZoomedImage({ src, alt })} /><span className="cursor" /></div></article>}
+              {running && !liveText && <ActivityIndicator label={requests.some((request) => requestThreadId(request) === selected.id) ? "等待你的确认" : activityLabels[selected.id] ?? "Codex 正在处理"} waiting={requests.some((request) => requestThreadId(request) === selected.id)} />}
+              {!selected.turns?.some((turn) => turn.items?.length) && !selectedOptimistic.length && !liveText && !running && <div className="thread-empty"><Bot size={28} /><p>发送第一条指令开始这个任务。</p></div>}
             </section>
 
             <section className="composer-wrap">
@@ -610,13 +854,15 @@ export default function App() {
 
       {sideThread && <aside className="side-chat">
         <header className="side-chat-header"><div><span>侧边聊天</span><strong>{sideThread.name || sideThread.preview || "Fork"}</strong></div><button className="icon-button" onClick={closeSideThread} aria-label="关闭侧边聊天"><X size={18} /></button></header>
-        <section className="side-timeline">
-          {(sideThread.turns ?? []).flatMap((turn) => turn.items ?? []).map((item, index) => <TimelineItem item={item} threadId={sideThread.id} openFile={previewFile} key={item.id ?? `side-${item.type}-${index}`} />)}
-          {sideLiveText && <article className="timeline-item assistant live"><div className="avatar"><Bot size={17} /></div><div className="bubble markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{sideLiveText}</ReactMarkdown><span className="cursor" /></div></article>}
+        <section className="side-timeline" ref={sideTimelineRef}>
+          {(sideThread.turns ?? []).flatMap((turn) => turn.items ?? []).map((item, index) => <TimelineItem item={item} threadId={sideThread.id} openFile={previewFile} openImage={(src, alt) => setZoomedImage({ src, alt })} key={item.id ?? `side-${item.type}-${index}`} />)}
+          {sideOptimistic.map((message) => <OptimisticUserMessage key={message.id} message={message} edit={() => editFailedMessage(message, true)} />)}
+          {sideLiveText && <article className="timeline-item assistant live"><div className="avatar"><Bot size={17} /></div><div className="bubble markdown"><MarkdownContent text={sideLiveText} threadId={sideThread.id} openFile={previewFile} openImage={(src, alt) => setZoomedImage({ src, alt })} /><span className="cursor" /></div></article>}
+          {sideRunning && !sideLiveText && <ActivityIndicator label={requests.some((request) => requestThreadId(request) === sideThread.id) ? "等待你的确认" : activityLabels[sideThread.id] ?? "Codex 正在处理"} waiting={requests.some((request) => requestThreadId(request) === sideThread.id)} />}
         </section>
         <section className="side-composer-wrap">
           {requests.filter((request) => requestThreadId(request) === sideThread.id).map((request) => <ApprovalCard key={String(request.id)} request={request} resolve={(result) => resolveRequest(request, result)} />)}
-          <div className="composer"><textarea value={sideDraft} onChange={(event) => setSideDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendSideTurn(); } }} placeholder="在 Fork 中继续探索…" rows={2} /><div className="composer-actions"><small>独立 Fork，不影响主对话</small><button className="send-button" disabled={!sideDraft.trim() || sideBusy} onClick={() => void sendSideTurn()} aria-label="发送侧边消息"><Send size={17} /></button></div></div>
+          <div className="composer"><textarea value={sideDraft} disabled={sideRunning} onChange={(event) => setSideDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendSideTurn(); } }} placeholder={sideRunning ? "Codex 正在处理…" : "在 Fork 中继续探索…"} rows={2} /><div className="composer-actions"><small>独立 Fork，不影响主对话</small><button className="send-button" disabled={!sideDraft.trim() || sideBusy || sideRunning} onClick={() => void sendSideTurn()} aria-label="发送侧边消息"><Send size={17} /></button></div></div>
         </section>
       </aside>}
 
@@ -631,7 +877,12 @@ export default function App() {
               {models.map((item) => <option value={item.model} key={item.id}>{item.displayName}</option>)}
             </select>
             <label htmlFor="new-project">项目</label>
-            <select id="new-project" value={newProjectId} onChange={(event) => setNewProjectId(event.target.value)}><option value="">不指定（按目录归类）</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>
+            <select id="new-project" value={newProjectId} onChange={(event) => {
+              const projectId = event.target.value;
+              setNewProjectId(projectId);
+              const project = projects.find((item) => item.id === projectId);
+              if (project?.roots[0]?.path) setNewCwd(project.roots[0].path);
+            }}><option value="">不指定（按目录归类）</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>
             <div className="safety-note"><ShieldAlert size={18} /><span>默认使用 workspace-write 沙箱和 on-request 审批。</span></div>
             <button className="primary" disabled={!newCwd.trim() || busy} onClick={() => void createThread()}>{busy ? "创建中…" : "创建任务"}</button>
           </section>
@@ -666,21 +917,21 @@ export default function App() {
             {filePath !== "." && <button className="file-row" onClick={() => void browseFiles(fileThreadId, parentPath(filePath))}><ArrowLeft size={15} /><span>上一级</span></button>}
             {fileEntries.map((entry) => <button className="file-row" disabled={entry.type === "other"} key={entry.path} onClick={() => entry.type === "directory" ? void browseFiles(fileThreadId, entry.path) : void previewFile(fileThreadId, entry.path)}>{entry.type === "directory" ? <FolderOpen size={15} /> : isImagePath(entry.path) ? <Image size={15} /> : <FileText size={15} />}<span>{entry.name}</span>{entry.size !== null && entry.type === "file" && <small>{formatBytes(entry.size)}</small>}</button>)}
           </aside>
-          <main className="file-preview">{fileBusy ? <div className="preview-empty"><RefreshCw className="spin" size={24} /> 读取中…</div> : filePreview ? <FilePreviewView preview={filePreview} /> : <div className="preview-empty"><FileText size={30} />选择文件查看内容</div>}</main>
+          <main className="file-preview">{fileBusy ? <div className="preview-empty"><RefreshCw className="spin" size={24} /> 读取中…</div> : filePreview ? <FilePreviewView preview={filePreview} openImage={(src, alt) => setZoomedImage({ src, alt })} /> : <div className="preview-empty"><FileText size={30} />选择文件查看内容</div>}</main>
         </div>
       </section></div>}
+      {zoomedImage && <div className="image-lightbox" role="dialog" aria-modal="true" aria-label="图片放大预览" onClick={() => setZoomedImage(null)}><button className="lightbox-close" onClick={() => setZoomedImage(null)} aria-label="关闭图片预览"><X size={22} /></button><img src={zoomedImage.src} alt={zoomedImage.alt} onClick={(event) => event.stopPropagation()} /></div>}
     </div>
   );
 }
 
-function TimelineItem({ item, threadId, openFile }: { item: ThreadItem; threadId: string; openFile: (threadId: string, path: string) => Promise<void> }) {
-  const [rating, setRating] = useState<"up" | "down" | null>(null);
+function TimelineItem({ item, threadId, openFile, openImage }: { item: ThreadItem; threadId: string; openFile: (threadId: string, path: string) => Promise<void>; openImage: (src: string, alt: string) => void }) {
   if (item.type === "userMessage") {
     const text = item.content?.filter((part) => part.type === "text").map((part) => part.text).join("\n") ?? "";
     return <article className="timeline-item user"><div className="bubble">{text}</div></article>;
   }
   if (item.type === "agentMessage") {
-    return <article className="timeline-item assistant"><div className="avatar"><Bot size={17} /></div><div className="message-body"><div className="bubble markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text ?? ""}</ReactMarkdown></div><div className="message-actions"><button onClick={() => void navigator.clipboard.writeText(item.text ?? "")} title="复制回复"><Copy size={14} /> 复制</button><button className={rating === "up" ? "selected" : ""} onClick={() => setRating(rating === "up" ? null : "up")} title="有帮助"><ThumbsUp size={14} /></button><button className={rating === "down" ? "selected" : ""} onClick={() => setRating(rating === "down" ? null : "down")} title="没有帮助"><ThumbsDown size={14} /></button></div></div></article>;
+    return <article className="timeline-item assistant"><div className="avatar"><Bot size={17} /></div><div className="message-body"><div className="bubble markdown"><MarkdownContent text={item.text ?? ""} threadId={threadId} openFile={openFile} openImage={openImage} /></div><div className="message-actions"><button onClick={() => void navigator.clipboard.writeText(item.text ?? "")} title="复制回复"><Copy size={14} /> 复制</button></div></div></article>;
   }
   if (item.type === "reasoning") {
     return <details className="tool-card reasoning"><summary><RefreshCw size={14} /> 思考过程</summary><div>{item.summary?.join("\n\n")}</div></details>;
@@ -696,15 +947,42 @@ function TimelineItem({ item, threadId, openFile }: { item: ThreadItem; threadId
   }
   if (item.type === "imageGeneration" && typeof item.result === "string") {
     const source = item.result.startsWith("data:") ? item.result : `data:image/png;base64,${item.result}`;
-    return <article className="generated-image"><img src={source} alt={typeof item.revisedPrompt === "string" ? item.revisedPrompt : "Codex 生成的图片"} /></article>;
+    const alt = typeof item.revisedPrompt === "string" ? item.revisedPrompt : "Codex 生成的图片";
+    return <article className="generated-image"><button type="button" onClick={() => openImage(source, alt)} title="点击放大"><img src={source} alt={alt} /><ZoomIn size={18} /></button></article>;
   }
   if (item.type === "mcpToolCall" || item.type === "dynamicToolCall" || item.type === "collabAgentToolCall") {
     return <details className="tool-card"><summary><Command size={15} /> {String(item.server ?? item.tool ?? item.type)} <span className="tool-status">{statusText(item.status)}</span></summary><pre>{JSON.stringify(item.arguments ?? item.result ?? item, null, 2)}</pre></details>;
   }
   if (item.type === "plan") {
-    return <article className="plan-card"><strong>计划</strong><div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{item.text ?? ""}</ReactMarkdown></div></article>;
+    return <article className="plan-card"><strong>计划</strong><div className="markdown"><MarkdownContent text={item.text ?? ""} threadId={threadId} openFile={openFile} openImage={openImage} /></div></article>;
   }
   return null;
+}
+
+function MarkdownContent({ text, threadId, openFile, openImage }: { text: string; threadId: string; openFile: (threadId: string, path: string) => Promise<void>; openImage: (src: string, alt: string) => void }) {
+  return <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={(url) => isSafeMarkdownUrl(url) ? url : ""} components={{
+    a: ({ href, children }) => {
+      const path = href ? localFilePath(href) : null;
+      return path
+        ? <a href={href} onClick={(event) => { event.preventDefault(); void openFile(threadId, path); }}>{children}</a>
+        : <a href={href} target="_blank" rel="noreferrer">{children}</a>;
+    },
+    img: ({ src, alt }) => {
+      if (!src) return null;
+      const path = localFilePath(src);
+      return path
+        ? <button type="button" className="markdown-local-image" onClick={() => void openFile(threadId, path)} title="在文件预览中打开"><Image size={18} /><span>{alt || path}</span></button>
+        : <button type="button" className="markdown-image" onClick={() => openImage(src, alt ?? "图片")} title="点击放大"><img src={src} alt={alt ?? ""} /><ZoomIn size={18} /></button>;
+    },
+  }}>{text}</ReactMarkdown>;
+}
+
+function OptimisticUserMessage({ message, edit }: { message: OptimisticMessage; edit: () => void }) {
+  return <article className={`timeline-item user optimistic ${message.state}`}><div className="user-message-wrap"><div className="bubble">{message.text}</div>{message.state === "sending" && <span className="delivery-state sending" title="正在发送"><LoaderCircle className="spin" size={15} /></span>}{message.state === "failed" && <button className="delivery-state failed" onClick={edit} title={message.error ? `发送失败：${message.error}。点击重新编辑` : "发送失败，点击重新编辑"} aria-label="发送失败，重新编辑"><X size={15} /></button>}</div></article>;
+}
+
+function ActivityIndicator({ label, waiting = false }: { label: string; waiting?: boolean }) {
+  return <article className={`timeline-item assistant activity ${waiting ? "waiting" : ""}`} aria-live="polite"><div className="avatar"><Bot size={17} /></div><div className="activity-bubble">{waiting ? <ShieldAlert size={15} /> : <LoaderCircle className="spin" size={15} />}<span>{label}</span>{!waiting && <i><b /><b /><b /></i>}</div></article>;
 }
 
 function GoalPill({ goal, open }: { goal: ThreadGoal; open: () => void }) {
@@ -747,16 +1025,83 @@ function DiffView({ diff }: { diff: string }) {
   return <pre className="diff-view">{diff.split("\n").map((line, index) => <span className={line.startsWith("+") && !line.startsWith("+++") ? "diff-add" : line.startsWith("-") && !line.startsWith("---") ? "diff-delete" : line.startsWith("@@") ? "diff-hunk" : ""} key={`${index}-${line.slice(0, 20)}`}>{line || " "}</span>)}</pre>;
 }
 
-function FilePreviewView({ preview }: { preview: FilePreview }) {
-  return <article className="preview-content"><header><strong>{preview.path}</strong><small>{formatBytes(preview.size)}{preview.mimeType ? ` · ${preview.mimeType}` : ""}</small></header>{preview.kind === "image" && preview.dataUrl ? <div className="image-preview"><img src={preview.dataUrl} alt={preview.path} /></div> : preview.kind === "text" ? <pre>{preview.content}</pre> : <div className="preview-empty">二进制文件不支持文本预览</div>}</article>;
+function FilePreviewView({ preview, openImage }: { preview: FilePreview; openImage: (src: string, alt: string) => void }) {
+  const language = languageFromPath(preview.path);
+  return <article className="preview-content"><header><strong>{preview.path}</strong><div className="preview-meta">{preview.kind === "text" && <span>{language}</span>}<small>{formatBytes(preview.size)}{preview.mimeType ? ` · ${preview.mimeType}` : ""}</small></div></header>{preview.kind === "image" && preview.dataUrl ? <button type="button" className="image-preview" onClick={() => openImage(preview.dataUrl as string, preview.path)} title="点击放大"><img src={preview.dataUrl} alt={preview.path} /><span><ZoomIn size={17} /> 点击放大</span></button> : preview.kind === "text" ? <HighlightedFile content={preview.content ?? ""} language={language} /> : <div className="preview-empty">二进制文件不支持文本预览</div>}</article>;
+}
+
+function HighlightedFile({ content, language }: { content: string; language: Language }) {
+  const code = content.endsWith("\n") ? content.slice(0, -1) : content;
+  const shouldHighlight = code.length <= 250_000;
+  if (!shouldHighlight) return <pre className="source-code plain-source">{code}</pre>;
+  return <Highlight theme={themes.oneDark} code={code} language={language}>{({ className, style, tokens, getLineProps, getTokenProps }) => (
+    <pre className={`${className} source-code`} style={{ ...style, background: "transparent" }}>
+      {tokens.map((line, index) => {
+        const lineProps = getLineProps({ line });
+        return <span {...lineProps} className={`${lineProps.className} source-line`} key={index}><span className="line-number">{index + 1}</span><span className="line-code">{line.map((token, tokenIndex) => <span {...getTokenProps({ token })} key={tokenIndex} />)}</span></span>;
+      })}
+    </pre>
+  )}</Highlight>;
 }
 
 function requestThreadId(request: ServerRequest): string | undefined {
   return typeof request.params.threadId === "string" ? request.params.threadId : undefined;
 }
 
+function reconcileOptimisticMessage(thread: Thread, setMessages: React.Dispatch<React.SetStateAction<OptimisticMessage[]>>): void {
+  const materializedTurns = new Set((thread.turns ?? []).filter((turn) => (turn.items ?? []).some((item) => item.type === "userMessage")).map((turn) => turn.id));
+  setMessages((current) => current.filter((message) => message.threadId !== thread.id || message.state === "failed" || !message.turnId || !materializedTurns.has(message.turnId)));
+}
+
+function activityLabel(item?: ThreadItem): string {
+  if (!item) return "Codex 正在处理";
+  if (item.type === "commandExecution") return "正在执行命令";
+  if (item.type === "fileChange") return "正在修改文件";
+  if (item.type === "reasoning") return "Codex 正在思考";
+  if (item.type === "agentMessage") return "正在生成回复";
+  if (item.type === "mcpToolCall" || item.type === "dynamicToolCall" || item.type === "collabAgentToolCall") return "正在调用工具";
+  if (item.type === "userMessage") return "消息已送达，Codex 正在思考";
+  return "Codex 正在处理";
+}
+
+function localFilePath(href: string): string | null {
+  let value = href.trim();
+  if (!value || value.startsWith("#") || /^(https?:|mailto:|tel:|data:|blob:)/i.test(value)) return null;
+  if (value.startsWith("file://")) {
+    try { value = new URL(value).pathname; } catch { return null; }
+  } else if (value.startsWith("sandbox:")) {
+    value = value.slice("sandbox:".length);
+  } else if (/^[a-z][a-z\d+.-]*:/i.test(value) && !/^[a-zA-Z]:[\\/]/.test(value)) {
+    return null;
+  }
+  value = value.split("#", 1)[0];
+  try { value = decodeURIComponent(value); } catch { /* Keep the original path if it is not URI encoded. */ }
+  value = value.replace(/:(\d+)(?::\d+)?$/, "");
+  return value || null;
+}
+
+function isSafeMarkdownUrl(url: string): boolean {
+  return localFilePath(url) !== null || /^(https?:|mailto:|tel:|data:image\/|blob:|#)/i.test(url);
+}
+
+function threadIdFromLocation(): string | null {
+  const match = window.location.pathname.match(/^\/thread\/([^/]+)\/?$/);
+  if (!match) return null;
+  try { return decodeURIComponent(match[1]); } catch { return null; }
+}
+
+function setThreadRoute(threadId: string | null, mode: "push" | "replace"): void {
+  const path = threadId ? `/thread/${encodeURIComponent(threadId)}` : "/";
+  if (window.location.pathname === path) return;
+  window.history[mode === "push" ? "pushState" : "replaceState"](null, "", path);
+}
+
 function isThreadActive(thread: Thread): boolean {
   return typeof thread.status === "object" && thread.status !== null && (thread.status as { type?: string }).type === "active";
+}
+
+function isThreadStarted(thread: Thread): boolean {
+  return (thread.turns ?? []).some((turn) => (turn.items ?? []).length > 0);
 }
 
 function statusText(status: unknown): string {
@@ -788,6 +1133,29 @@ function isImagePath(path: string): boolean {
   return /\.(png|jpe?g|gif|webp|svg|bmp|avif)$/i.test(path);
 }
 
+function languageFromPath(path: string): Language {
+  const fileName = path.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  if (fileName === "dockerfile") return "docker";
+  if (fileName === "makefile") return "makefile";
+  const extension = fileName.includes(".") ? fileName.split(".").pop() ?? "" : "";
+  return ({
+    js: "javascript", jsx: "jsx", mjs: "javascript", cjs: "javascript",
+    ts: "typescript", tsx: "tsx", mts: "typescript", cts: "typescript",
+    py: "python", rb: "ruby", rs: "rust", go: "go", java: "java", kt: "kotlin", kts: "kotlin",
+    c: "c", h: "c", cc: "cpp", cpp: "cpp", cxx: "cpp", hpp: "cpp", cs: "csharp",
+    php: "php", swift: "swift", scala: "scala", sh: "bash", bash: "bash", zsh: "bash", fish: "bash",
+    json: "json", jsonc: "json", yaml: "yaml", yml: "yaml", toml: "toml", xml: "markup",
+    html: "markup", htm: "markup", vue: "markup", svelte: "markup", svg: "markup",
+    css: "css", scss: "scss", sass: "sass", less: "less",
+    md: "markdown", mdx: "markdown", sql: "sql", graphql: "graphql", gql: "graphql",
+    diff: "diff", patch: "diff", ini: "ini", env: "bash",
+  } as Record<string, Language>)[extension] ?? "text";
+}
+
+function isChatThread(thread: Thread): boolean {
+  return thread.cwd.split(/[\\/]/).includes(CHAT_WORKSPACE_SEGMENT);
+}
+
 function formatBytes(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
@@ -805,14 +1173,30 @@ function fileChangeKind(kind: string | { type?: string }): string {
   return typeof kind === "string" ? kind : kind.type ?? "update";
 }
 
-function groupThreads(threads: Thread[], projects: Project[]): Array<{ id: string; name: string; threads: Thread[] }> {
+function groupThreads(threads: Thread[], projects: Project[]): ThreadGroup[] {
   const projectMap = new Map(projects.map((project) => [project.id, project]));
-  const groups = new Map<string, { id: string; name: string; threads: Thread[]; position: number }>();
+  const groups = new Map<string, ThreadGroup>();
+  groups.set("chat", { id: "chat", name: "聊天", threads: [], position: -1, kind: "chat" });
+  for (const project of projects) {
+    groups.set(`project:${project.id}`, {
+      id: `project:${project.id}`,
+      name: project.name,
+      threads: [],
+      position: project.position,
+      kind: "project",
+      root: project.roots[0]?.path,
+      projectId: project.id,
+    });
+  }
   for (const thread of threads) {
+    if (isChatThread(thread)) {
+      groups.get("chat")?.threads.push(thread);
+      continue;
+    }
     const project = thread.projectId ? projectMap.get(thread.projectId) : undefined;
     const id = project ? `project:${project.id}` : `cwd:${thread.cwd}`;
     const name = project?.name ?? shortPath(thread.cwd);
-    const group = groups.get(id) ?? { id, name, threads: [], position: project?.position ?? Number.MAX_SAFE_INTEGER };
+    const group = groups.get(id) ?? { id, name, threads: [], position: project?.position ?? Number.MAX_SAFE_INTEGER, kind: project ? "project" : "directory", root: project?.roots[0]?.path ?? thread.cwd, projectId: project?.id };
     group.threads.push(thread);
     groups.set(id, group);
   }
