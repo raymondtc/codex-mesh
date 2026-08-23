@@ -1,40 +1,37 @@
-# Codex Remote Web
+# Codex Mesh
 
-一个参考 Remodex 交互的移动端优先 Web/PWA：Codex 和仓库留在你的主机上，浏览器通过受限桥接实时查看、继续和审批任务。
-
-## 已实现
-
-- 优先连接本机 Codex daemon，共享已加载线程；不可用时启动 `codex app-server --stdio`
-- 任务列表、创建、恢复和完整历史读取；支持不关联项目的隔离聊天 Session
-- 原生 Codex Project 管理；未归属任务按工作目录自动分组，项目与目录可折叠及快捷新建
-- 会话列表快捷 Fork、`/fork`/`/side` 命令和并行侧边聊天
-- 原生持久目标（描述、状态、Token 预算、用量和耗时）及 ChatGPT 风格完成胶囊
-- 每个会话使用独立 `/thread/{id}` 地址，支持刷新恢复及浏览器前进/后退
-- 对话搜索、重命名、归档与回复复制；用户消息支持发送中、成功和失败状态
-- 实时 assistant delta、Codex 工作状态、命令输出、文件变更、计划和工具卡片
-- Unified diff、受限文件浏览、Agent 本地文件链接、语法高亮文本预览和图片放大
-- 发送后续指令、选择模型/推理强度、中断正在执行的 turn
-- 命令与文件变更审批，以及 `request_user_input` 问答
-- 共享 Token 鉴权、WebSocket 负载限制、app-server RPC 白名单
-- 响应式布局与 PWA manifest
+Codex Mesh 是一个自托管的 Codex 控制面。用户在浏览器登录后，可以管理自己的 Codex 机器、项目和会话；仓库、Codex 登录凭据、沙箱与工具执行仍留在各自机器上。
 
 ## 架构
 
 ```text
-手机 / 桌面浏览器
-        │  WSS + shared bearer token
-        ▼
-Node.js bridge (RPC 白名单 + 审批路由)
-        │  WebSocket over Unix socket，或 JSONL over stdio
-        ▼
-codex app-server ── 本机登录、仓库、沙箱与工具
+浏览器 ── HTTPS / WSS ──► Codex Mesh Server ──► PostgreSQL / PGlite
+                              ▲
+                              │ 出站 WSS（一次性配对码 + 机器密钥）
+                              │
+                        codex-mesh Agent
+                              │ Unix socket / stdio
+                              ▼
+                       codex app-server
 ```
 
-桥接层不允许浏览器任意调用 app-server。MVP 只暴露 thread、turn、model、account 和 project 的少量方法；`fs/*`、`process/*`、插件安装和配置写入默认被拒绝。
+Agent 主动连接 Server，因此 Codex 机器不需要公网 IP、FRP 或开放入站端口。OpenAI/Codex 凭据不会上传到控制面。
 
-## 运行
+## 已实现
 
-要求 Node.js 20+ 与已登录的 Codex CLI。当前已在 `codex-cli 0.149.0` 上做过联调。
+- Better Auth 邮箱密码注册、登录、HttpOnly Session Cookie 和首用户管理员
+- 用户列表与管理员角色管理，用户之间的机器和会话数据隔离
+- 默认持久化 PGlite，设置 `DATABASE_URL` 后使用 PostgreSQL；启动时自动迁移
+- 一次性机器配对码、哈希存储机器密钥、在线状态、撤销和审计事件
+- npm Agent 出站连接控制面，并复用本机 Codex daemon 或启动 `codex app-server`
+- 每个会话使用数据库生成的稳定 `/thread/{meshId}` 地址，支持前进、后退和跨机器恢复
+- 隔离聊天 Session、项目/目录分组与折叠、快捷新建、Fork 和侧边聊天
+- Codex 工作状态、用户消息发送状态、实时回复、审批与目标管理
+- 受限文件浏览、语法高亮、图片预览放大和 Agent 文件链接
+
+## 本地运行
+
+要求 Node.js 20+。如果启用控制面本机 Codex，还需要安装并登录 Codex CLI。
 
 ```bash
 cp .env.example .env
@@ -42,51 +39,60 @@ npm install
 npm run dev
 ```
 
-开发模式中打开 `http://127.0.0.1:5173`。生产构建：
+开发页面位于 `http://127.0.0.1:5173`，Vite 会代理到 8787 端口的 Server。首次注册的账户会自动成为管理员。
+
+生产构建：
 
 ```bash
 npm run build
-REMOTE_WEB_TOKEN='your-long-random-token' npm start
-```
-
-默认只监听 `127.0.0.1:8787`。如果需要让其他设备访问，建议先用 Tailscale/WireGuard 组网，或者在 Caddy/Nginx 后提供 HTTPS/WSS，然后显式设置：
-
-```bash
-HOST=0.0.0.0 \
-PORT=8787 \
-REMOTE_WEB_TOKEN='at-least-24-random-characters' \
 npm start
 ```
 
-桥接层会自动连接 `~/.codex/app-server-control/app-server-control.sock`（如果 daemon 正在运行），从而与 Codex 桌面端、IDE 或 Remote 共享线程写入者。也可以用 `CODEX_APP_SERVER_URL` 显式指定 `unix://`、`ws://` 或 `wss://` 地址；设置为 `stdio://` 可强制启动隔离的 app-server。
-
-不要把本服务以明文 HTTP 直接暴露到公网。Token 保存在浏览器 `localStorage`，适合个人单用户 MVP，不是多租户身份系统。
-
-## 协议升级
-
-app-server 仍属快速演进的实验性界面。升级 Codex CLI 后可在项目根目录运行：
+未设置 `DATABASE_URL` 时，数据默认保存在 `~/.codex-mesh/database`。生产环境建议使用 PostgreSQL：
 
 ```bash
-npm run protocol:generate
+DATABASE_URL=postgresql://user:password@db.example.com:5432/codex_mesh
 ```
 
-这会把当前 CLI 的 TypeScript 协议生成到 `protocol/`（已 gitignore），用于比对方法名与 payload。
+## 添加 Codex 机器
 
-## 本机真实 E2E
-
-服务启动后运行以下命令。测试会连接当前 WebSocket Bridge，读取真实 Project/thread/文件，验证隔离聊天 Session，并创建及归档测试 fork，通过本机 Codex 完成一个最小 turn，再验证 Goal set/get/clear：
+1. 登录 Web 界面，打开“机器”，点击“添加机器”。
+2. 在目标 Codex 机器运行界面给出的命令：
 
 ```bash
-npm run e2e:local
+npx codex-mesh pair --server https://mesh.example.com --code XXXX-XXXX
 ```
 
-如果没有可用的已完成 thread，可以显式设置 `E2E_THREAD_ID`。设置 `E2E_RUN_TURN=0` 可跳过会产生模型调用的 fork/turn 部分。
+配对码十分钟有效且只能使用一次。Agent 配置保存在 `~/.codex-mesh/agent.json`，权限为 `0600`。后续可以用 `npx codex-mesh start` 重新启动。
 
-## 下一阶段
+## 部署注意
 
-1. 图片/文件附件上传：服务端暂存后转换为 `localImage` / `localAudio` input。
-2. Git 状态与提交面板：使用独立、受审批的 Git service，不开放通用 shell RPC。
-3. 语音输入与系统通知：PWA Web Push + 浏览器录音。
-4. 配对协议：以一次性二维码交换设备密钥，替换共享 Token。
-5. 多主机和断线队列：每主机独立身份、持久化转发和通知。
-6. 受限 SSH 终端：单独权限与审计记录，不与 Codex RPC 通道混用。
+- 公网部署必须使用 HTTPS/WSS，并把 `BETTER_AUTH_URL` 和 `TRUSTED_ORIGINS` 设置为公开地址。
+- `BETTER_AUTH_SECRET` 必须是至少 32 字符的随机值，并在实例生命周期内保持不变。
+- Server 默认监听 `127.0.0.1:8787`；仅在反向代理或私有网络后设置 `HOST=0.0.0.0`。
+- Server 与 Agent 都只转发明确白名单中的 Codex RPC；文件读取被限制在会话工作目录内。
+- 如不希望 Server 使用本机 Codex，设置 `CODEX_LOCAL_MACHINE=off`。
+
+完整变量见 [.env.example](./.env.example)。
+
+## 验证
+
+```bash
+npm run check
+npm run e2e:control
+```
+
+`e2e:control` 会用隔离的 PGlite 数据库启动控制面，并验证注册、管理员权限、用户隔离、一次性配对、出站 Agent RPC、机器撤销与会话深链接。已有本机 Codex 服务时，还可以运行 `npm run e2e:local` 做真实线程、文件和 turn 测试。
+
+## npm Agent 开发
+
+Agent 包位于 `agent/`，发布名为 `codex-mesh`：
+
+```bash
+npm pack -w codex-mesh
+npm publish -w codex-mesh
+```
+
+## License
+
+MIT

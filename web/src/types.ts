@@ -39,8 +39,21 @@ export interface Thread {
   status: unknown;
   turns: Turn[];
   projectId?: string | null;
+  meshId?: string;
+  machineId?: string;
   modelProvider?: string;
   gitInfo?: { branch?: string; repositoryUrl?: string } | null;
+}
+
+export interface Machine {
+  id: string;
+  name: string;
+  kind: "local" | "agent";
+  online: boolean;
+  agentVersion?: string | null;
+  codexVersion?: string | null;
+  capabilities: string[];
+  lastSeenAt?: string | null;
 }
 
 export interface Project {

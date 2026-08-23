@@ -3,6 +3,7 @@ import type { ConnectionState, ServerRequest } from "./types";
 type EventHandler = (method: string, params: unknown) => void;
 type StateHandler = (state: ConnectionState, message?: string) => void;
 type RequestHandler = (request: ServerRequest) => void;
+type ReadyHandler = (info: { version?: string; capabilities: string[]; initialized?: unknown }) => void;
 
 interface PendingCall {
   resolve: (result: unknown) => void;
@@ -13,7 +14,6 @@ export class BridgeClient {
   private socket?: WebSocket;
   private nextId = 1;
   private pending = new Map<string, PendingCall>();
-  private token = "";
   private shouldReconnect = false;
   private reconnectAttempts = 0;
   private reconnectTimer?: number;
@@ -21,10 +21,10 @@ export class BridgeClient {
   onEvent?: EventHandler;
   onState?: StateHandler;
   onServerRequest?: RequestHandler;
+  onReady?: ReadyHandler;
 
-  connect(token: string): void {
+  connect(): void {
     this.disconnect();
-    this.token = token;
     this.shouldReconnect = true;
     this.reconnectAttempts = 0;
     this.openSocket();
@@ -38,14 +38,11 @@ export class BridgeClient {
     const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
     this.socket = socket;
 
-    socket.addEventListener("open", () => {
-      socket.send(JSON.stringify({ type: "auth", token: this.token }));
-    });
-
     socket.addEventListener("message", (event) => {
       const message = JSON.parse(String(event.data)) as Record<string, unknown>;
       if (message.type === "ready") {
         this.capabilities = new Set(Array.isArray(message.capabilities) ? message.capabilities.filter((value): value is string => typeof value === "string") : []);
+        this.onReady?.({ version: typeof message.version === "string" ? message.version : undefined, capabilities: [...this.capabilities], initialized: message.initialized });
         this.reconnectAttempts = 0;
         this.onState?.("ready");
         return;
@@ -82,7 +79,7 @@ export class BridgeClient {
       this.pending.clear();
       if (event.code === 4401) {
         this.shouldReconnect = false;
-        this.onState?.("closed", "Token 错误");
+        this.onState?.("closed", "登录已失效");
         return;
       }
       if (this.shouldReconnect) {

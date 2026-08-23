@@ -20,7 +20,6 @@ export interface RpcNotification {
 export type AppServerMessage = RpcRequest | RpcResponse | RpcNotification;
 
 export type BrowserMessage =
-  | { type: "auth"; token: string }
   | { type: "rpc"; id: string; method: string; params?: unknown }
   | { type: "serverResponse"; id: number | string; result?: unknown; error?: { message: string } };
 

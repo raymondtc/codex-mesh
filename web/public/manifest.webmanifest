@@ -1,7 +1,7 @@
 {
-  "name": "Codex Remote Web",
-  "short_name": "Codex Remote",
-  "description": "Monitor and steer a local Codex runtime remotely.",
+  "name": "Codex Mesh",
+  "short_name": "Codex Mesh",
+  "description": "Manage and steer your Codex machines remotely.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0c0f0e",

@@ -69,8 +69,8 @@ export class AppServerClient extends EventEmitter {
   private async initialize(): Promise<void> {
     this.initializedResponse = await this.request("initialize", {
       clientInfo: {
-        name: "codex-remote-web",
-        title: "Codex Remote Web",
+        name: "codex-mesh-server",
+        title: "Codex Mesh Server",
         version: "0.1.0",
       },
       capabilities: {

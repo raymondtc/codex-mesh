@@ -1,13 +1,14 @@
 {
-  "name": "codex-remote-web",
+  "name": "codex-mesh-workspace",
   "version": "0.1.0",
   "private": true,
-  "workspaces": ["server", "web"],
+  "workspaces": ["server", "web", "agent"],
   "scripts": {
     "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w server\" \"npm run dev -w web\"",
-    "build": "npm run build -w web && npm run build -w server",
+    "build": "npm run build -w web && npm run build -w server && npm run build -w codex-mesh",
     "start": "npm run start -w server",
-    "check": "npm run check -w server && npm run check -w web",
+    "check": "npm run check -w server && npm run check -w web && npm run check -w codex-mesh",
+    "e2e:control": "npm run build && node scripts/control-plane-e2e.mjs",
     "e2e:local": "node scripts/local-e2e.mjs",
     "protocol:generate": "codex app-server generate-ts --experimental --out protocol"
   },

@@ -15,11 +15,12 @@ import {
   FolderOpen,
   FileText,
   GitFork,
-  KeyRound,
   Image,
   LoaderCircle,
+  LogOut,
   Menu,
   MessageCircle,
+  MonitorCog,
   Pencil,
   MessageSquarePlus,
   PanelRightOpen,
@@ -28,6 +29,7 @@ import {
   Search,
   Target,
   Trash2,
+  Users,
   Send,
   ShieldAlert,
   TerminalSquare,
@@ -37,8 +39,9 @@ import {
 import { Highlight, themes, type Language } from "prism-react-renderer";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { authClient } from "./auth-client";
 import { BridgeClient } from "./bridge";
-import type { ConnectionState, JsonObject, Project, ServerRequest, Thread, ThreadGoal, ThreadItem, Turn } from "./types";
+import type { ConnectionState, JsonObject, Machine, Project, ServerRequest, Thread, ThreadGoal, ThreadItem, Turn } from "./types";
 
 interface ModelInfo {
   id: string;
@@ -65,9 +68,16 @@ interface FilePreview {
   mimeType?: string;
 }
 
-const STORED_TOKEN = "codex-remote-token";
 const COLLAPSED_GROUPS_KEY = "codex-remote-collapsed-groups";
-const CHAT_WORKSPACE_SEGMENT = "codex-remote-chat-workspaces";
+const CHAT_WORKSPACE_SEGMENTS = new Set(["codex-mesh-chat-workspaces", "codex-remote-chat-workspaces"]);
+
+interface UserSummary {
+  id: string;
+  name: string;
+  email: string;
+  role: "admin" | "user";
+  createdAt: string;
+}
 
 interface ThreadGroup {
   id: string;
@@ -94,12 +104,18 @@ interface ZoomedImage {
 }
 
 export default function App() {
+  const authSession = authClient.useSession();
   const bridge = useMemo(() => new BridgeClient(), []);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [connectionMessage, setConnectionMessage] = useState("");
   const [hasConnected, setHasConnected] = useState(false);
-  const [token, setToken] = useState(() => localStorage.getItem(STORED_TOKEN) ?? "");
-  const [tokenDraft, setTokenDraft] = useState(token);
+  const [machines, setMachines] = useState<Machine[]>([]);
+  const [selectedMachineId, setSelectedMachineId] = useState("");
+  const [showMachines, setShowMachines] = useState(false);
+  const [showUsers, setShowUsers] = useState(false);
+  const [users, setUsers] = useState<UserSummary[]>([]);
+  const [currentRole, setCurrentRole] = useState("");
+  const [enrollment, setEnrollment] = useState<{ code: string; expiresAt: string } | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selected, setSelected] = useState<Thread | null>(null);
@@ -168,6 +184,12 @@ export default function App() {
     setProjects(result.data);
   }, [bridge]);
 
+  const loadMachines = useCallback(async () => {
+    const result = await bridge.call<{ data: Machine[] }>("bridge/machine/list");
+    setMachines(result.data);
+    return result.data;
+  }, [bridge]);
+
   const refreshSelected = useCallback(async () => {
     const threadId = selectedIdRef.current;
     if (!threadId) return;
@@ -201,17 +223,30 @@ export default function App() {
   }, [bridge]);
 
   useEffect(() => {
+    if (!authSession.data) {
+      bridge.disconnect();
+      setHasConnected(false);
+      return;
+    }
+    void fetch("/api/me").then(async (response) => {
+      if (!response.ok) throw new Error("Unable to load current user");
+      return response.json() as Promise<{ user: { role?: string } }>;
+    }).then((value) => setCurrentRole(value.user.role ?? "user")).catch(() => setCurrentRole("user"));
+    bridge.onReady = (info) => {
+      const initialized = info.initialized as { machineId?: string | null } | undefined;
+      if (initialized?.machineId) setSelectedMachineId(initialized.machineId);
+    };
     bridge.onState = (state, message) => {
       setConnection(state);
       setConnectionMessage(message ?? "");
-      if (state === "closed" && message === "Token 错误") {
-        localStorage.removeItem(STORED_TOKEN);
-        setTokenDraft("");
+      if (state === "closed" && message === "登录已失效") {
         setHasConnected(false);
+        void authSession.refetch();
       }
       if (state === "ready") {
         setHasConnected(true);
         Promise.all([
+          loadMachines(),
           loadThreads(),
           loadProjects(),
           bridge.call<{ data: ModelInfo[] }>("model/list", { includeHidden: false }).then((result) => {
@@ -222,12 +257,12 @@ export default function App() {
               setEffort(initial.defaultReasoningEffort);
             }
           }),
-        ]).then(([loadedThreads]) => {
-          const routeThreadId = threadIdFromLocation();
-          if (!routeThreadId || routeThreadId === selectedIdRef.current) return;
-          const routeThread = loadedThreads.find((thread) => thread.id === routeThreadId);
+        ]).then(([, loadedThreads]) => {
+          const conversationId = threadIdFromLocation();
+          if (!conversationId) return;
+          const routeThread = loadedThreads.find((thread) => thread.meshId === conversationId);
           if (routeThread) void selectThread(routeThread, "none");
-          else void bridge.call<{ thread: Thread }>("thread/read", { threadId: routeThreadId, includeTurns: false })
+          else void bridge.call<{ thread: Thread }>("bridge/conversation/resolve", { conversationId })
             .then((result) => selectThread(result.thread, "none"))
             .catch(() => {
               window.history.replaceState(null, "", "/");
@@ -310,34 +345,35 @@ export default function App() {
     };
 
     const handleHistoryNavigation = () => {
-      const threadId = threadIdFromLocation();
-      if (!threadId) {
+      const conversationId = threadIdFromLocation();
+      if (!conversationId) {
         selectedIdRef.current = null;
         setSelected(null);
         setGoal(null);
         return;
       }
-      const thread = threadsRef.current.find((item) => item.id === threadId);
+      const thread = threadsRef.current.find((item) => item.meshId === conversationId);
       if (thread) void selectThread(thread, "none");
-      else void bridge.call<{ thread: Thread }>("thread/read", { threadId, includeTurns: false })
+      else void bridge.call<{ thread: Thread }>("bridge/conversation/resolve", { conversationId })
         .then((result) => selectThread(result.thread, "none"))
         .catch(() => setError("无法打开历史地址中的会话"));
     };
     window.addEventListener("popstate", handleHistoryNavigation);
 
-    bridge.connect(token);
+    bridge.connect();
     return () => {
       window.clearTimeout(refreshTimer.current);
       window.removeEventListener("popstate", handleHistoryNavigation);
       bridge.disconnect();
     };
-  }, [bridge, loadProjects, loadThreads, refreshSelected, refreshSideThread, token]);
+  }, [authSession.data?.user.id, bridge, loadMachines, loadProjects, loadThreads, refreshSelected, refreshSideThread]);
 
   async function selectThread(thread: Thread, routeMode: "push" | "replace" | "none" = "push") {
     setSidebarOpen(false);
     setError("");
     selectedIdRef.current = thread.id;
-    if (routeMode !== "none") setThreadRoute(thread.id, routeMode);
+    if (thread.machineId) setSelectedMachineId(thread.machineId);
+    if (routeMode !== "none") setThreadRoute(thread.meshId ?? thread.id, routeMode);
     setGoal(null);
     setSelected({ ...thread, turns: thread.turns ?? [] });
     try {
@@ -425,7 +461,7 @@ export default function App() {
         sandbox: "workspace-write",
       });
       selectedIdRef.current = result.thread.id;
-      setThreadRoute(result.thread.id, "push");
+      setThreadRoute(result.thread.meshId ?? result.thread.id, "push");
       setSelected({ ...result.thread, name: result.thread.name ?? "新聊天" });
       setGoal(null);
       setLiveText("");
@@ -451,7 +487,7 @@ export default function App() {
         sandbox: "workspace-write",
       });
       selectedIdRef.current = result.thread.id;
-      setThreadRoute(result.thread.id, "push");
+      setThreadRoute(result.thread.meshId ?? result.thread.id, "push");
       setSelected(result.thread);
       setShowNewThread(false);
       await loadThreads();
@@ -513,7 +549,7 @@ export default function App() {
         await bridge.call("thread/name/set", { threadId: result.thread.id, name: sideName });
       } else {
         selectedIdRef.current = result.thread.id;
-        setThreadRoute(result.thread.id, "push");
+        setThreadRoute(result.thread.meshId ?? result.thread.id, "push");
         setSelected(result.thread);
         setLiveText("");
         setSidebarOpen(false);
@@ -670,19 +706,59 @@ export default function App() {
     await bridge.call("turn/interrupt", { threadId: selected.id, turnId });
   }
 
-  function saveToken(event: React.FormEvent) {
-    event.preventDefault();
-    localStorage.setItem(STORED_TOKEN, tokenDraft);
-    setToken(tokenDraft);
+  async function selectMachine(machineId: string) {
+    if (machineId === selectedMachineId) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await bridge.call<{ online: boolean }>("bridge/machine/select", { machineId });
+      setSelectedMachineId(machineId);
+      selectedIdRef.current = null;
+      setSelected(null);
+      setSideThread(null);
+      setThreadRoute(null, "push");
+      setThreads([]);
+      setProjects([]);
+      if (!result.online) throw new Error("机器当前离线");
+      await Promise.all([loadThreads(), loadProjects()]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally { setBusy(false); }
   }
 
-  function changeToken() {
-    localStorage.removeItem(STORED_TOKEN);
-    setTokenDraft("");
-    setHasConnected(false);
-    setConnection("closed");
-    setConnectionMessage("请输入新 Token");
-    bridge.disconnect();
+  async function createEnrollment() {
+    const result = await bridge.call<{ code: string; expiresAt: string }>("bridge/machine/enrollment/create");
+    setEnrollment(result);
+  }
+
+  async function removeMachine(machineId: string) {
+    if (!window.confirm("撤销这台机器？Agent 将立即断开。")) return;
+    await bridge.call("bridge/machine/revoke", { machineId });
+    await loadMachines();
+  }
+
+  async function openUsers() {
+    setError("");
+    try {
+      const response = await fetch("/api/users");
+      const body = await response.json() as { data?: UserSummary[]; error?: string };
+      if (!response.ok || !body.data) throw new Error(body.error ?? "无法读取用户列表");
+      setUsers(body.data);
+      setShowUsers(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function setUserRole(userId: string, role: "admin" | "user") {
+    const response = await fetch(`/api/users/${encodeURIComponent(userId)}/role`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role }),
+    });
+    const body = await response.json() as { updated?: boolean; error?: string };
+    if (!response.ok || !body.updated) { setError(body.error ?? "更新用户角色失败"); return; }
+    setUsers((current) => current.map((item) => item.id === userId ? { ...item, role } : item));
   }
 
   function resolveRequest(request: ServerRequest, result: unknown) {
@@ -716,21 +792,20 @@ export default function App() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [zoomedImage]);
 
+  if (authSession.isPending) return <main className="connect-page"><LoaderCircle className="spin" size={28} /></main>;
+  if (!authSession.data) return <AuthPage />;
+  const currentUserId = authSession.data.user.id;
+
   if (connection !== "ready" && !hasConnected) {
     return (
       <main className="connect-page">
         <section className="connect-card">
           <div className="brand-mark"><Command size={28} /></div>
-          <p className="eyebrow">CODEX REMOTE</p>
-          <h1>连接你的开发主机</h1>
-          <p className="muted">浏览器只是遥控器；Codex、代码仓库和命令仍运行在你的主机上。</p>
-          <form onSubmit={saveToken}>
-            <label htmlFor="token"><KeyRound size={15} /> 访问 Token</label>
-            <input id="token" type="password" value={tokenDraft} onChange={(event) => setTokenDraft(event.target.value)} placeholder="REMOTE_WEB_TOKEN" autoComplete="current-password" />
-            <button className="primary" type="submit"><RefreshCw size={16} /> {connection === "connecting" ? "连接中…" : "重新连接"}</button>
-          </form>
+          <p className="eyebrow">CODEX MESH</p>
+          <h1>正在连接 Mesh</h1>
+          <p className="muted">身份验证已完成，正在建立实时会话通道。</p>
+          <button className="primary reconnect-action" onClick={() => bridge.connect()}><RefreshCw size={16} /> {connection === "connecting" ? "连接中…" : "重新连接"}</button>
           {connectionMessage && <p className="error-text">{connectionMessage}</p>}
-          <p className="fine-print">本地默认可以留空；远程访问请使用 HTTPS 和长随机 Token。</p>
         </section>
       </main>
     );
@@ -746,7 +821,7 @@ export default function App() {
     <div className={`app-shell ${sideThread ? "with-side-chat" : ""}`}>
       <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <header className="sidebar-header">
-          <div className="brand"><span className="brand-mark small"><Command size={18} /></span><span>Codex Remote</span></div>
+          <div className="brand"><span className="brand-mark small"><Command size={18} /></span><span>Codex Mesh</span></div>
           <button className="icon-button mobile-only" onClick={() => setSidebarOpen(false)} aria-label="关闭侧边栏"><X size={19} /></button>
         </header>
         <div className="sidebar-create">
@@ -785,7 +860,7 @@ export default function App() {
           })}
           {!threads.length && <p className="empty-list">还没有 Codex 任务。</p>}
         </div>
-        <footer className="sidebar-footer"><span><i className="online-dot" /> app-server 已连接</span><button onClick={changeToken}><KeyRound size={13} /> 更换 Token</button></footer>
+        <footer className="sidebar-footer"><span><i className={`online-dot ${machines.find((item) => item.id === selectedMachineId)?.online ? "" : "offline"}`} /> {machines.find((item) => item.id === selectedMachineId)?.name ?? "未选择机器"}</span><div>{currentRole === "admin" && <button onClick={() => void openUsers()}><Users size={13} /> 用户</button>}<button onClick={() => setShowMachines(true)}><MonitorCog size={13} /> 机器</button><button onClick={() => void authClient.signOut()}><LogOut size={13} /> 退出</button></div></footer>
       </aside>
 
       {sidebarOpen && <button className="scrim" onClick={() => setSidebarOpen(false)} aria-label="关闭侧边栏" />}
@@ -797,6 +872,7 @@ export default function App() {
             <strong>{selected?.name || selected?.preview || "选择一个任务"}</strong>
             {selected && <small>{selectedIsChat ? "独立聊天 Session" : selected.cwd}</small>}
           </div>
+          <select className="machine-select" value={selectedMachineId} onChange={(event) => void selectMachine(event.target.value)} aria-label="Codex 机器"><option value="">选择机器</option>{machines.map((machine) => <option key={machine.id} value={machine.id}>{machine.online ? "●" : "○"} {machine.name}</option>)}</select>
           {selected && !selectedIsChat && <select className="project-select" value={selected.projectId ?? ""} onChange={(event) => void assignProject(event.target.value)} aria-label="所属项目"><option value="">按目录归类</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>}
           {selected && !selectedIsChat && <button className="icon-button" onClick={() => void browseFiles(selected.id)} aria-label="浏览项目文件" title="文件"><FolderOpen size={17} /></button>}
           {selected && selectedStarted && <button className={`icon-button ${goal ? "goal-active" : ""}`} onClick={() => { setGoalObjective(goal?.objective ?? ""); setGoalBudget(goal?.tokenBudget?.toString() ?? ""); setShowGoal(true); }} aria-label="目标" title="目标"><Target size={17} /></button>}
@@ -889,6 +965,10 @@ export default function App() {
         </div>
       )}
 
+      {showMachines && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="Codex 机器"><section className="modal machine-modal"><header><MonitorCog size={20} /><h2>Codex 机器</h2><button className="icon-button" onClick={() => setShowMachines(false)}><X size={18} /></button></header><p className="muted">已登录为 {authSession.data.user.email}</p><div className="machine-list">{machines.map((machine) => <article key={machine.id}><i className={`online-dot ${machine.online ? "" : "offline"}`} /><span><strong>{machine.name}</strong><small>{machine.kind === "local" ? "控制面本机" : `${machine.agentVersion ?? "Agent"} · ${machine.online ? "在线" : "离线"}`}</small></span>{machine.kind === "agent" && <button onClick={() => void removeMachine(machine.id)}><Trash2 size={14} /></button>}</article>)}</div>{enrollment ? <div className="pairing-code"><small>在目标机器运行（10 分钟内有效）</small><code>npx codex-mesh pair --server {window.location.origin} --code {enrollment.code}</code><button onClick={() => void navigator.clipboard.writeText(`npx codex-mesh pair --server ${window.location.origin} --code ${enrollment.code}`)}><Copy size={14} /> 复制</button></div> : <button className="primary" onClick={() => void createEnrollment()}><Plus size={16} /> 添加机器</button>}</section></div>}
+
+      {showUsers && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="用户管理"><section className="modal user-modal"><header><Users size={20} /><h2>用户管理</h2><button className="icon-button" onClick={() => setShowUsers(false)}><X size={18} /></button></header><p className="muted">管理员可以查看账户并分配管理权限。</p><div className="user-list">{users.map((item) => <article key={item.id}><span><strong>{item.name}</strong><small>{item.email}</small></span><select value={item.role} disabled={item.id === currentUserId} onChange={(event) => void setUserRole(item.id, event.target.value as "admin" | "user")} aria-label={`${item.email} 的角色`}><option value="user">用户</option><option value="admin">管理员</option></select></article>)}</div></section></div>}
+
       {showNewProject && (
         <div className="modal-layer" role="dialog" aria-modal="true" aria-label="新建项目">
           <section className="modal">
@@ -923,6 +1003,28 @@ export default function App() {
       {zoomedImage && <div className="image-lightbox" role="dialog" aria-modal="true" aria-label="图片放大预览" onClick={() => setZoomedImage(null)}><button className="lightbox-close" onClick={() => setZoomedImage(null)} aria-label="关闭图片预览"><X size={22} /></button><img src={zoomedImage.src} alt={zoomedImage.alt} onClick={(event) => event.stopPropagation()} /></div>}
     </div>
   );
+}
+
+function AuthPage() {
+  const [registering, setRegistering] = useState(false);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [pending, setPending] = useState(false);
+  const [authError, setAuthError] = useState("");
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setPending(true);
+    setAuthError("");
+    const result = registering
+      ? await authClient.signUp.email({ name: name.trim(), email: email.trim(), password })
+      : await authClient.signIn.email({ email: email.trim(), password });
+    if (result.error) setAuthError(result.error.message ?? "身份验证失败");
+    setPending(false);
+  }
+
+  return <main className="connect-page"><section className="connect-card auth-card"><div className="brand-mark"><Command size={28} /></div><p className="eyebrow">CODEX MESH</p><h1>{registering ? "创建账户" : "登录"}</h1><p className="muted">统一管理你自己的 Codex 机器；OpenAI 登录凭据仍只保留在机器本地。</p><form onSubmit={(event) => void submit(event)}>{registering && <><label htmlFor="auth-name">显示名称</label><input id="auth-name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></>}<label htmlFor="auth-email">邮箱</label><input id="auth-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required /><label htmlFor="auth-password">密码</label><input id="auth-password" type="password" minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={registering ? "new-password" : "current-password"} required /><button className="primary" disabled={pending}>{pending ? <LoaderCircle className="spin" size={16} /> : null}{registering ? "注册" : "登录"}</button></form>{authError && <p className="error-text">{authError}</p>}<button className="auth-switch" onClick={() => { setRegistering((value) => !value); setAuthError(""); }}>{registering ? "已有账户？登录" : "还没有账户？注册"}</button></section></main>;
 }
 
 function TimelineItem({ item, threadId, openFile, openImage }: { item: ThreadItem; threadId: string; openFile: (threadId: string, path: string) => Promise<void>; openImage: (src: string, alt: string) => void }) {
@@ -1153,7 +1255,7 @@ function languageFromPath(path: string): Language {
 }
 
 function isChatThread(thread: Thread): boolean {
-  return thread.cwd.split(/[\\/]/).includes(CHAT_WORKSPACE_SEGMENT);
+  return thread.cwd.split(/[\\/]/).some((segment) => CHAT_WORKSPACE_SEGMENTS.has(segment));
 }
 
 function formatBytes(size: number): string {
