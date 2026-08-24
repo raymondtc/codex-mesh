@@ -17,6 +17,12 @@ export interface MachineRecord {
   revokedAt: Date | null;
 }
 
+export interface UserSettings {
+  defaultPermission: "read-only" | "workspace-write" | "full-access";
+  defaultModel: string | null;
+  defaultReasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+}
+
 export async function ensureFirstUserAdmin(userId: string): Promise<void> {
   await queryDb.execute(sql`update "user" set "role" = 'admin' where "id" = ${userId} and not exists (select 1 from "user" where "role" = 'admin')`);
 }
@@ -33,6 +39,24 @@ export async function getUserRole(userId: string): Promise<string | null> {
 export async function updateUserRole(userId: string, role: "admin" | "user"): Promise<boolean> {
   const rows = await queryDb.update(user).set({ role, updatedAt: new Date() }).where(eq(user.id, userId)).returning({ id: user.id });
   return rows.length > 0;
+}
+
+export async function getUserSettings(userId: string): Promise<UserSettings | null> {
+  const [record] = await queryDb.select({
+    defaultPermission: user.defaultPermission,
+    defaultModel: user.defaultModel,
+    defaultReasoningEffort: user.defaultReasoningEffort,
+  }).from(user).where(eq(user.id, userId)).limit(1);
+  return record as UserSettings | undefined ?? null;
+}
+
+export async function updateUserSettings(userId: string, settings: UserSettings): Promise<UserSettings | null> {
+  const [record] = await queryDb.update(user).set({ ...settings, updatedAt: new Date() }).where(eq(user.id, userId)).returning({
+    defaultPermission: user.defaultPermission,
+    defaultModel: user.defaultModel,
+    defaultReasoningEffort: user.defaultReasoningEffort,
+  });
+  return record as UserSettings | undefined ?? null;
 }
 
 export async function ensureLocalMachine(userId: string): Promise<MachineRecord | null> {

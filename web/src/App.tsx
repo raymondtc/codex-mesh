@@ -27,6 +27,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Settings2,
   Target,
   Trash2,
   Users,
@@ -50,6 +51,17 @@ interface ModelInfo {
   isDefault: boolean;
   defaultReasoningEffort: string;
 }
+
+type PermissionMode = "read-only" | "workspace-write" | "full-access";
+type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+
+interface UserSettings {
+  defaultPermission: PermissionMode;
+  defaultModel: string | null;
+  defaultReasoningEffort: ReasoningEffort;
+}
+
+const REASONING_EFFORTS: ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 interface FileEntry {
   name: string;
@@ -113,6 +125,7 @@ export default function App() {
   const [selectedMachineId, setSelectedMachineId] = useState("");
   const [showMachines, setShowMachines] = useState(false);
   const [showUsers, setShowUsers] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [users, setUsers] = useState<UserSummary[]>([]);
   const [currentRole, setCurrentRole] = useState("");
   const [enrollment, setEnrollment] = useState<{ code: string; expiresAt: string } | null>(null);
@@ -124,7 +137,8 @@ export default function App() {
   const sideThreadIdRef = useRef<string | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [model, setModel] = useState("");
-  const [effort, setEffort] = useState("high");
+  const [effort, setEffort] = useState<ReasoningEffort>("high");
+  const [permission, setPermission] = useState<PermissionMode>("workspace-write");
   const [draft, setDraft] = useState("");
   const [liveText, setLiveText] = useState("");
   const [sideLiveText, setSideLiveText] = useState("");
@@ -249,15 +263,18 @@ export default function App() {
           loadMachines(),
           loadThreads(),
           loadProjects(),
-          bridge.call<{ data: ModelInfo[] }>("model/list", { includeHidden: false }).then((result) => {
-            setModels(result.data);
-            const initial = result.data.find((item) => item.isDefault) ?? result.data[0];
-            if (initial) {
-              setModel(initial.model);
-              setEffort(initial.defaultReasoningEffort);
-            }
+          bridge.call<{ data: ModelInfo[] }>("model/list", { includeHidden: false }),
+          fetch("/api/settings").then(async (response) => {
+            if (!response.ok) throw new Error("无法加载用户默认设置");
+            return response.json() as Promise<UserSettings>;
           }),
-        ]).then(([, loadedThreads]) => {
+        ]).then(([, loadedThreads, , modelResult, settings]) => {
+          setModels(modelResult.data);
+          const preferred = modelResult.data.find((item) => item.model === settings.defaultModel);
+          const initial = preferred ?? modelResult.data.find((item) => item.isDefault) ?? modelResult.data[0];
+          if (initial) setModel(initial.model);
+          setEffort(settings.defaultReasoningEffort);
+          setPermission(settings.defaultPermission);
           const conversationId = threadIdFromLocation();
           if (!conversationId) return;
           const routeThread = loadedThreads.find((thread) => thread.meshId === conversationId);
@@ -457,8 +474,7 @@ export default function App() {
     try {
       const result = await bridge.call<{ thread: Thread }>("bridge/session/start", {
         ...(model ? { model } : {}),
-        approvalPolicy: "on-request",
-        sandbox: "workspace-write",
+        ...threadPermissionParams(permission),
       });
       selectedIdRef.current = result.thread.id;
       setThreadRoute(result.thread.meshId ?? result.thread.id, "push");
@@ -483,8 +499,7 @@ export default function App() {
         cwd: newCwd.trim(),
         ...(newProjectId ? { projectId: newProjectId } : {}),
         ...(model ? { model } : {}),
-        approvalPolicy: "on-request",
-        sandbox: "workspace-write",
+        ...threadPermissionParams(permission),
       });
       selectedIdRef.current = result.thread.id;
       setThreadRoute(result.thread.meshId ?? result.thread.id, "push");
@@ -599,6 +614,7 @@ export default function App() {
         input: [{ type: "text", text: message, text_elements: [] }],
         ...(model ? { model } : {}),
         effort,
+        ...turnPermissionParams(permission),
       });
       setOptimisticMessages((current) => current.map((item) => item.id === optimisticId ? { ...item, state: "sent", turnId: result.turn.id } : item));
       setActiveTurns((current) => ({ ...current, [selected.id]: result.turn.id }));
@@ -634,6 +650,7 @@ export default function App() {
         input: [{ type: "text", text: message, text_elements: [] }],
         ...(model ? { model } : {}),
         effort,
+        ...turnPermissionParams(permission),
       });
       setOptimisticMessages((current) => current.map((item) => item.id === optimisticId ? { ...item, state: "sent", turnId: result.turn.id } : item));
       setActiveTurns((current) => ({ ...current, [sideThread.id]: result.turn.id }));
@@ -761,6 +778,29 @@ export default function App() {
     setUsers((current) => current.map((item) => item.id === userId ? { ...item, role } : item));
   }
 
+  async function saveDefaultSettings() {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          defaultPermission: permission,
+          defaultModel: model || null,
+          defaultReasoningEffort: effort,
+        }),
+      });
+      const body = await response.json() as UserSettings & { error?: string };
+      if (!response.ok) throw new Error(body.error ?? "保存默认设置失败");
+      setShowSettings(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function resolveRequest(request: ServerRequest, result: unknown) {
     bridge.respond(request.id, result);
     setRequests((current) => current.filter((item) => item.id !== request.id));
@@ -860,7 +900,7 @@ export default function App() {
           })}
           {!threads.length && <p className="empty-list">还没有 Codex 任务。</p>}
         </div>
-        <footer className="sidebar-footer"><span><i className={`online-dot ${machines.find((item) => item.id === selectedMachineId)?.online ? "" : "offline"}`} /> {machines.find((item) => item.id === selectedMachineId)?.name ?? "未选择机器"}</span><div>{currentRole === "admin" && <button onClick={() => void openUsers()}><Users size={13} /> 用户</button>}<button onClick={() => setShowMachines(true)}><MonitorCog size={13} /> 机器</button><button onClick={() => void authClient.signOut()}><LogOut size={13} /> 退出</button></div></footer>
+        <footer className="sidebar-footer"><span><i className={`online-dot ${machines.find((item) => item.id === selectedMachineId)?.online ? "" : "offline"}`} /> {machines.find((item) => item.id === selectedMachineId)?.name ?? "未选择机器"}</span><div>{currentRole === "admin" && <button onClick={() => void openUsers()}><Users size={13} /> 用户</button>}<button onClick={() => setShowSettings(true)}><Settings2 size={13} /> 设置</button><button onClick={() => setShowMachines(true)}><MonitorCog size={13} /> 机器</button><button onClick={() => void authClient.signOut()}><LogOut size={13} /> 退出</button></div></footer>
       </aside>
 
       {sidebarOpen && <button className="scrim" onClick={() => setSidebarOpen(false)} aria-label="关闭侧边栏" />}
@@ -913,11 +953,16 @@ export default function App() {
                 }} placeholder="给 Codex 发送后续指令…" rows={2} />
                 <div className="composer-actions">
                   <div className="runtime-controls">
+                    <select value={permission} onChange={(event) => setPermission(event.target.value as PermissionMode)} aria-label="权限" className={`permission-select permission-${permission}`}>
+                      <option value="read-only">只读</option>
+                      <option value="workspace-write">工作区</option>
+                      <option value="full-access">完全访问</option>
+                    </select>
                     <select value={model} onChange={(event) => setModel(event.target.value)} aria-label="模型">
                       {models.map((item) => <option value={item.model} key={item.id}>{item.displayName}</option>)}
                     </select>
-                    <select value={effort} onChange={(event) => setEffort(event.target.value)} aria-label="推理强度">
-                      {['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map((value) => <option value={value} key={value}>{value}</option>)}
+                    <select value={effort} onChange={(event) => setEffort(event.target.value as ReasoningEffort)} aria-label="推理强度">
+                      {REASONING_EFFORTS.map((value) => <option value={value} key={value}>{value}</option>)}
                     </select>
                   </div>
                   {running ? <button className="stop-button" onClick={() => void interruptTurn()}><CircleStop size={17} /> 停止</button> : <button className="send-button" disabled={!draft.trim() || busy} onClick={() => void sendTurn()} aria-label="发送"><Send size={18} /></button>}
@@ -952,6 +997,10 @@ export default function App() {
             <select id="new-model" value={model} onChange={(event) => setModel(event.target.value)}>
               {models.map((item) => <option value={item.model} key={item.id}>{item.displayName}</option>)}
             </select>
+            <label htmlFor="new-permission">权限</label>
+            <select id="new-permission" value={permission} onChange={(event) => setPermission(event.target.value as PermissionMode)}>
+              <option value="read-only">只读（修改时询问）</option><option value="workspace-write">工作区写入</option><option value="full-access">完全访问（不询问）</option>
+            </select>
             <label htmlFor="new-project">项目</label>
             <select id="new-project" value={newProjectId} onChange={(event) => {
               const projectId = event.target.value;
@@ -959,13 +1008,26 @@ export default function App() {
               const project = projects.find((item) => item.id === projectId);
               if (project?.roots[0]?.path) setNewCwd(project.roots[0].path);
             }}><option value="">不指定（按目录归类）</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>
-            <div className="safety-note"><ShieldAlert size={18} /><span>默认使用 workspace-write 沙箱和 on-request 审批。</span></div>
+            <div className="safety-note"><ShieldAlert size={18} /><span>{permissionDescription(permission)}</span></div>
             <button className="primary" disabled={!newCwd.trim() || busy} onClick={() => void createThread()}>{busy ? "创建中…" : "创建任务"}</button>
           </section>
         </div>
       )}
 
       {showMachines && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="Codex 机器"><section className="modal machine-modal"><header><MonitorCog size={20} /><h2>Codex 机器</h2><button className="icon-button" onClick={() => setShowMachines(false)}><X size={18} /></button></header><p className="muted">已登录为 {authSession.data.user.email}</p><div className="machine-list">{machines.map((machine) => <article key={machine.id}><i className={`online-dot ${machine.online ? "" : "offline"}`} /><span><strong>{machine.name}</strong><small>{machine.kind === "local" ? "控制面本机" : `${machine.agentVersion ?? "Agent"} · ${machine.online ? "在线" : "离线"}`}</small></span>{machine.kind === "agent" && <button onClick={() => void removeMachine(machine.id)}><Trash2 size={14} /></button>}</article>)}</div>{enrollment ? <div className="pairing-code"><small>在目标机器运行（10 分钟内有效）</small><code>npx codex-mesh pair --server {window.location.origin} --code {enrollment.code}</code><button onClick={() => void navigator.clipboard.writeText(`npx codex-mesh pair --server ${window.location.origin} --code ${enrollment.code}`)}><Copy size={14} /> 复制</button></div> : <button className="primary" onClick={() => void createEnrollment()}><Plus size={16} /> 添加机器</button>}</section></div>}
+
+      {showSettings && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="默认设置"><section className="modal settings-modal">
+        <header><Settings2 size={20} /><h2>聊天默认设置</h2><button className="icon-button" onClick={() => setShowSettings(false)}><X size={18} /></button></header>
+        <p className="muted">用于新聊天，也会立即应用到当前聊天的下一条消息。</p>
+        <label htmlFor="default-permission">默认权限</label>
+        <select id="default-permission" value={permission} onChange={(event) => setPermission(event.target.value as PermissionMode)}><option value="read-only">只读</option><option value="workspace-write">工作区写入</option><option value="full-access">完全访问</option></select>
+        <div className={`permission-note permission-${permission}`}><ShieldAlert size={17} /><span>{permissionDescription(permission)}</span></div>
+        <label htmlFor="default-model">默认模型</label>
+        <select id="default-model" value={model} onChange={(event) => setModel(event.target.value)}>{models.map((item) => <option value={item.model} key={item.id}>{item.displayName}</option>)}</select>
+        <label htmlFor="default-effort">默认 Thinking level</label>
+        <select id="default-effort" value={effort} onChange={(event) => setEffort(event.target.value as ReasoningEffort)}>{REASONING_EFFORTS.map((value) => <option value={value} key={value}>{value}</option>)}</select>
+        <button className="primary" disabled={busy} onClick={() => void saveDefaultSettings()}>{busy ? "保存中…" : "保存默认设置"}</button>
+      </section></div>}
 
       {showUsers && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="用户管理"><section className="modal user-modal"><header><Users size={20} /><h2>用户管理</h2><button className="icon-button" onClick={() => setShowUsers(false)}><X size={18} /></button></header><p className="muted">管理员可以查看账户并分配管理权限。</p><div className="user-list">{users.map((item) => <article key={item.id}><span><strong>{item.name}</strong><small>{item.email}</small></span><select value={item.role} disabled={item.id === currentUserId} onChange={(event) => void setUserRole(item.id, event.target.value as "admin" | "user")} aria-label={`${item.email} 的角色`}><option value="user">用户</option><option value="admin">管理员</option></select></article>)}</div></section></div>}
 
@@ -1003,6 +1065,24 @@ export default function App() {
       {zoomedImage && <div className="image-lightbox" role="dialog" aria-modal="true" aria-label="图片放大预览" onClick={() => setZoomedImage(null)}><button className="lightbox-close" onClick={() => setZoomedImage(null)} aria-label="关闭图片预览"><X size={22} /></button><img src={zoomedImage.src} alt={zoomedImage.alt} onClick={(event) => event.stopPropagation()} /></div>}
     </div>
   );
+}
+
+function threadPermissionParams(permission: PermissionMode): { approvalPolicy: string; sandbox: string } {
+  if (permission === "read-only") return { approvalPolicy: "on-request", sandbox: "read-only" };
+  if (permission === "full-access") return { approvalPolicy: "never", sandbox: "danger-full-access" };
+  return { approvalPolicy: "on-request", sandbox: "workspace-write" };
+}
+
+function turnPermissionParams(permission: PermissionMode): { approvalPolicy: string; sandboxPolicy: Record<string, unknown> } {
+  if (permission === "read-only") return { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } };
+  if (permission === "full-access") return { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } };
+  return { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } };
+}
+
+function permissionDescription(permission: PermissionMode): string {
+  if (permission === "read-only") return "Codex 可以读取文件；需要修改文件或执行越界操作时会请求批准。";
+  if (permission === "full-access") return "Codex 可不经询问访问系统和网络。仅在可信任务中使用。";
+  return "Codex 可以修改当前工作区；越过工作区边界时会请求批准。";
 }
 
 function AuthPage() {

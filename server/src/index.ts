@@ -16,7 +16,7 @@ import { AgentMachineTransport, LocalMachineTransport, MachineRegistry, type Mac
 import {
   authenticateMachine, createMachineEnrollment, ensureFirstUserAdmin, ensureLocalMachine, getUserRole, listMachines, listUsers,
   machineBelongsToUser, redeemMachineEnrollment, resolveConversation, revokeMachine, updateMachinePresence,
-  updateUserRole, upsertConversation, type MachineRecord,
+  updateUserRole, upsertConversation, getUserSettings, updateUserSettings, type MachineRecord, type UserSettings,
 } from "./repository.js";
 import type { BridgeMessage, BrowserMessage, RpcRequest } from "./protocol.js";
 
@@ -63,6 +63,27 @@ app.get("/api/me", async (request, response) => {
   if (!session) return response.status(401).json({ error: "Unauthorized" });
   await ensureFirstUserAdmin(session.user.id);
   return response.json({ ...session, user: { ...session.user, role: await getUserRole(session.user.id) } });
+});
+
+app.get("/api/settings", async (request, response) => {
+  const session = await requestSession(request);
+  if (!session) return response.status(401).json({ error: "Unauthorized" });
+  const settings = await getUserSettings(session.user.id);
+  return settings ? response.json(settings) : response.status(404).json({ error: "User not found" });
+});
+
+app.patch("/api/settings", async (request, response) => {
+  const session = await requestSession(request);
+  if (!session) return response.status(401).json({ error: "Unauthorized" });
+  const permission = request.body?.defaultPermission;
+  const model = request.body?.defaultModel;
+  const effort = request.body?.defaultReasoningEffort;
+  if (!["read-only", "workspace-write", "full-access"].includes(permission)) return response.status(400).json({ error: "Invalid default permission" });
+  if (model !== null && (typeof model !== "string" || model.length > 128)) return response.status(400).json({ error: "Invalid default model" });
+  if (!["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)) return response.status(400).json({ error: "Invalid reasoning effort" });
+  const settings: UserSettings = { defaultPermission: permission, defaultModel: model || null, defaultReasoningEffort: effort };
+  const updated = await updateUserSettings(session.user.id, settings);
+  return updated ? response.json(updated) : response.status(404).json({ error: "User not found" });
 });
 
 app.get("/api/users", async (request, response) => {

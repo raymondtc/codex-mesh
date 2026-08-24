@@ -13,7 +13,12 @@ export function createLocalRpcHandler(appServer: AppServerClient) {
       const root = resolve(tmpdir(), "codex-mesh-chat-workspaces");
       await mkdir(root, { recursive: true, mode: 0o700 });
       const cwd = await mkdtemp(join(root, "session-"));
-      return appServer.request("thread/start", { cwd, approvalPolicy: "on-request", sandbox: "workspace-write", ...(typeof input.model === "string" ? { model: input.model } : {}) });
+      return appServer.request("thread/start", {
+        cwd,
+        approvalPolicy: input.approvalPolicy ?? "on-request",
+        sandbox: input.sandbox ?? "workspace-write",
+        ...(typeof input.model === "string" ? { model: input.model } : {}),
+      });
     }
     if (method.startsWith("bridge/fs/")) return fileRpc(appServer, method, params);
     if (!allowedMethods.has(method)) throw new Error(`Method is not exposed: ${method}`);

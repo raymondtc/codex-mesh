@@ -19,7 +19,11 @@ export function createLocalRpcHandler(appServer: AppServerClient): (method: stri
       const input = (params ?? {}) as Record<string, unknown>;
       await mkdir(chatWorkspaceRoot, { recursive: true, mode: 0o700 });
       const cwd = await mkdtemp(join(chatWorkspaceRoot, "session-"));
-      const threadParams: Record<string, unknown> = { cwd, approvalPolicy: "on-request", sandbox: "workspace-write" };
+      const threadParams: Record<string, unknown> = {
+        cwd,
+        approvalPolicy: input.approvalPolicy ?? "on-request",
+        sandbox: input.sandbox ?? "workspace-write",
+      };
       if (typeof input.model === "string" && input.model) threadParams.model = input.model;
       return appServer.request("thread/start", threadParams);
     }

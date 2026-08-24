@@ -7,6 +7,9 @@ export const user = pgTable("user", {
   emailVerified: boolean("email_verified").default(false).notNull(),
   image: text("image"),
   role: text("role").default("user").notNull(),
+  defaultPermission: text("default_permission").default("workspace-write").notNull(),
+  defaultModel: text("default_model"),
+  defaultReasoningEffort: text("default_reasoning_effort").default("high").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
