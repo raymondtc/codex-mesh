@@ -16,7 +16,7 @@ import { AgentMachineTransport, LocalMachineTransport, MachineRegistry, type Mac
 import {
   authenticateMachine, createMachineEnrollment, ensureFirstUserAdmin, ensureLocalMachine, getUserRole, listMachines, listUsers,
   machineBelongsToUser, redeemMachineEnrollment, resolveConversation, revokeMachine, updateMachinePresence,
-  updateUserRole, upsertConversation, getUserSettings, updateUserSettings, type MachineRecord, type UserSettings,
+  updateUserRole, upsertConversation, getUserSettings, updateUserSettings, updateConversationMetadata, deleteConversation, type MachineRecord, type UserSettings, type ConversationMetadata,
 } from "./repository.js";
 import type { BridgeMessage, BrowserMessage, RpcRequest } from "./protocol.js";
 
@@ -30,7 +30,7 @@ const daemonSocket = resolve(codexHome, "app-server-control/app-server-control.s
 const appServerUrl = configuredAppServerUrl ?? (existsSync(daemonSocket) ? `unix://${daemonSocket}` : undefined);
 const localMachineEnabled = process.env.CODEX_LOCAL_MACHINE !== "off";
 const bridgeVersion = "0.3.0";
-const bridgeCapabilities = ["bridge/session/start", "bridge/fs/readDirectory", "bridge/fs/readFile", "bridge/machine/list", "bridge/machine/select", "bridge/machine/enrollment/create", "bridge/conversation/resolve"];
+const bridgeCapabilities = ["bridge/session/start", "bridge/fs/readDirectory", "bridge/fs/readFile", "bridge/git/worktree/create", "bridge/machine/list", "bridge/machine/select", "bridge/machine/enrollment/create", "bridge/conversation/resolve", "bridge/conversation/metadata/update"];
 const trustedOrigins = new Set((process.env.TRUSTED_ORIGINS ?? process.env.BETTER_AUTH_URL ?? `http://127.0.0.1:${port}`).split(",").map((value) => value.trim()).filter(Boolean));
 
 interface BrowserContext { userId: string; machineId?: string }
@@ -249,12 +249,28 @@ async function handleBrowserRpc(context: BrowserContext, method: string, params:
     return decorateRpcResult(context.userId, conversation.machineId, "thread/read", result);
   }
 
+  if (method === "bridge/conversation/metadata/update") {
+    const machineId = typeof input.__machineId === "string" ? input.__machineId : context.machineId;
+    if (!machineId || !await machineBelongsToUser(machineId, context.userId)) throw new Error("Select an available machine first");
+    if (typeof input.threadId !== "string") throw new Error("threadId is required");
+    if (!["standard", "side", "fork", "worktree"].includes(String(input.kind))) throw new Error("Invalid conversation kind");
+    const metadata: ConversationMetadata = {
+      kind: input.kind as ConversationMetadata["kind"],
+      parentRemoteThreadId: optionalString(input.parentRemoteThreadId),
+      mainRoot: optionalString(input.mainRoot),
+      worktreePath: optionalString(input.worktreePath),
+      branch: optionalString(input.branch),
+    };
+    return { updated: await updateConversationMetadata(context.userId, machineId, input.threadId, metadata) };
+  }
+
   const machineId = typeof input.__machineId === "string" ? input.__machineId : context.machineId;
   if (!machineId || !await machineBelongsToUser(machineId, context.userId)) throw new Error("Select an available machine first");
   context.machineId = machineId;
   const forwardedParams = { ...input };
   delete forwardedParams.__machineId;
   const result = await requireMachine(machineId).request(method, forwardedParams);
+  if (method === "thread/delete" && typeof forwardedParams.threadId === "string") await deleteConversation(context.userId, machineId, forwardedParams.threadId);
   return decorateRpcResult(context.userId, machineId, method, result);
 }
 
@@ -342,6 +358,10 @@ function consumePairingAttempt(key: string): boolean {
   if (current.count >= 20) return false;
   current.count += 1;
   return true;
+}
+
+function optionalString(value: unknown): string | null | undefined {
+  return value === null ? null : typeof value === "string" && value.length <= 4096 ? value : undefined;
 }
 
 async function main(): Promise<void> {

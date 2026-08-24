@@ -85,6 +85,11 @@ export const conversations = pgTable("conversations", {
   remoteThreadId: text("remote_thread_id").notNull(),
   remoteProjectId: text("remote_project_id"),
   title: text("title"),
+  kind: text("kind").default("standard").notNull(),
+  parentRemoteThreadId: text("parent_remote_thread_id"),
+  mainRoot: text("main_root"),
+  worktreePath: text("worktree_path"),
+  branch: text("branch"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [

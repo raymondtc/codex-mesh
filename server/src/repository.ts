@@ -23,6 +23,14 @@ export interface UserSettings {
   defaultReasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 }
 
+export interface ConversationMetadata {
+  kind: "standard" | "side" | "fork" | "worktree";
+  parentRemoteThreadId?: string | null;
+  mainRoot?: string | null;
+  worktreePath?: string | null;
+  branch?: string | null;
+}
+
 export async function ensureFirstUserAdmin(userId: string): Promise<void> {
   await queryDb.execute(sql`update "user" set "role" = 'admin' where "id" = ${userId} and not exists (select 1 from "user" where "role" = 'admin')`);
 }
@@ -121,14 +129,16 @@ export async function machineBelongsToUser(machineId: string, userId: string): P
   return Boolean(machine);
 }
 
-export async function upsertConversation(userId: string, machineId: string, thread: Record<string, unknown>): Promise<Record<string, unknown>> {
+export async function upsertConversation(userId: string, machineId: string, thread: Record<string, unknown>, metadata?: ConversationMetadata): Promise<Record<string, unknown>> {
   if (typeof thread.id !== "string") return thread;
+  const effectiveMetadata = metadata ?? (typeof thread.name === "string" && thread.name.endsWith(" · 侧聊") ? { kind: "side" as const } : undefined);
   const [conversation] = await queryDb.insert(conversations).values({
     ownerUserId: userId,
     machineId,
     remoteThreadId: thread.id,
     remoteProjectId: typeof thread.projectId === "string" ? thread.projectId : null,
     title: typeof thread.name === "string" ? thread.name : typeof thread.preview === "string" ? thread.preview : null,
+    ...(effectiveMetadata ?? {}),
   }).onConflictDoUpdate({
     target: [conversations.machineId, conversations.remoteThreadId],
     set: {
@@ -136,9 +146,19 @@ export async function upsertConversation(userId: string, machineId: string, thre
       remoteProjectId: typeof thread.projectId === "string" ? thread.projectId : null,
       title: typeof thread.name === "string" ? thread.name : typeof thread.preview === "string" ? thread.preview : null,
       updatedAt: new Date(),
+      ...(effectiveMetadata ?? {}),
     },
   }).returning();
-  return { ...thread, meshId: conversation.id, machineId };
+  return { ...thread, meshId: conversation.id, machineId, conversationKind: conversation.kind, parentRemoteThreadId: conversation.parentRemoteThreadId, mainRoot: conversation.mainRoot, worktreePath: conversation.worktreePath, branch: conversation.branch };
+}
+
+export async function updateConversationMetadata(userId: string, machineId: string, remoteThreadId: string, metadata: ConversationMetadata): Promise<boolean> {
+  const rows = await queryDb.update(conversations).set({ ...metadata, updatedAt: new Date() }).where(and(eq(conversations.ownerUserId, userId), eq(conversations.machineId, machineId), eq(conversations.remoteThreadId, remoteThreadId))).returning({ id: conversations.id });
+  return rows.length > 0;
+}
+
+export async function deleteConversation(userId: string, machineId: string, remoteThreadId: string): Promise<void> {
+  await queryDb.delete(conversations).where(and(eq(conversations.ownerUserId, userId), eq(conversations.machineId, machineId), eq(conversations.remoteThreadId, remoteThreadId)));
 }
 
 export async function resolveConversation(userId: string, conversationId: string): Promise<{ machineId: string; remoteThreadId: string } | null> {

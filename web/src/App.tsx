@@ -15,6 +15,7 @@ import {
   FolderOpen,
   FileText,
   GitFork,
+  GitBranch,
   Image,
   LoaderCircle,
   LogOut,
@@ -140,6 +141,7 @@ export default function App() {
   const [selected, setSelected] = useState<Thread | null>(null);
   const selectedIdRef = useRef<string | null>(null);
   const [sideThread, setSideThread] = useState<Thread | null>(null);
+  const [sideHiddenTurnIds, setSideHiddenTurnIds] = useState<Set<string>>(new Set());
   const sideThreadIdRef = useRef<string | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [model, setModel] = useState("");
@@ -557,14 +559,38 @@ export default function App() {
     }
   }
 
-  async function forkThread(source: Thread | null = selected, openBeside = false) {
+  async function forkThread(source: Thread | null = selected, openBeside = false, useWorktree = false) {
     if (!source || busy) return;
+    let worktree: { mainRoot: string; worktreePath: string; branch: string } | null = null;
+    if (useWorktree) {
+      const suggested = `codex/${new Date().toISOString().slice(0, 10)}-${source.id.slice(-6)}`;
+      const branch = window.prompt("输入新 worktree 的分支名", suggested)?.trim();
+      if (!branch) return;
+      if (!window.confirm(`将创建并保留：\n分支 ${branch}\n对应 Git worktree。删除会话不会删除它。`)) return;
+      try {
+        worktree = await bridge.call("bridge/git/worktree/create", { threadId: source.id, branch });
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+        return;
+      }
+    }
     setBusy(true);
     setError("");
     try {
-      const result = await bridge.call<{ thread: Thread }>("thread/fork", { threadId: source.id });
+      const result = await bridge.call<{ thread: Thread }>("thread/fork", { threadId: source.id, ...(worktree ? { cwd: worktree.worktreePath } : {}), ...(openBeside ? { excludeTurns: true } : {}) });
+      const kind = worktree ? "worktree" : openBeside ? "side" : "fork";
+      await bridge.call("bridge/conversation/metadata/update", {
+        threadId: result.thread.id,
+        kind,
+        parentRemoteThreadId: source.id,
+        ...(worktree ? { mainRoot: worktree.mainRoot, worktreePath: worktree.worktreePath, branch: worktree.branch } : {}),
+      });
+      result.thread.conversationKind = kind;
+      result.thread.parentRemoteThreadId = source.id;
+      if (worktree) Object.assign(result.thread, worktree);
       if (openBeside) {
         sideThreadIdRef.current = result.thread.id;
+        setSideHiddenTurnIds(new Set((source.turns ?? []).map((turn) => turn.id)));
         const sideName = `${source.name || source.preview || "任务"} · 侧聊`;
         setSideThread({ ...result.thread, name: sideName });
         setSideLiveText("");
@@ -582,6 +608,19 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function deleteThread(thread: Thread) {
+    if (!window.confirm(`永久删除“${thread.name || thread.preview || "该会话"}”？${thread.conversationKind === "worktree" ? "\n\n关联的 worktree 和 branch 会保留。" : ""}`)) return;
+    setBusy(true);
+    setError("");
+    try {
+      await bridge.call("thread/delete", { threadId: thread.id });
+      if (selected?.id === thread.id) { selectedIdRef.current = null; setSelected(null); setGoal(null); setThreadRoute(null, "push"); }
+      if (sideThread?.id === thread.id) closeSideThread();
+      await loadThreads();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
   }
 
   async function sendTurn(overrideMessage?: string) {
@@ -688,6 +727,7 @@ export default function App() {
     setSideThread(null);
     setSideDraft("");
     setSideLiveText("");
+    setSideHiddenTurnIds(new Set());
   }
 
   async function browseFiles(threadId: string, path = ".") {
@@ -895,12 +935,16 @@ export default function App() {
                   <button className="thread-row-main" onClick={() => void selectThread(thread)}>
                     <span className={`status-dot ${isThreadActive(thread) ? "running" : ""}`} />
                     <span className="thread-copy">
-                      <strong>{thread.name || thread.preview || (isChatThread(thread) ? "新聊天" : "新任务")}</strong>
-                      <small>{thread.forkedFromId && <GitFork size={11} />} {isChatThread(thread) ? "独立聊天" : shortPath(thread.cwd)}</small>
+                      <strong>{thread.name || thread.preview || (isChatThread(thread) ? "新聊天" : "新任务")}{thread.conversationKind === "side" && <em className="thread-kind side">侧聊</em>}{thread.conversationKind === "worktree" && <em className="thread-kind worktree">WT</em>}</strong>
+                      <small>{thread.conversationKind === "worktree" ? <GitBranch size={11} /> : thread.forkedFromId && <GitFork size={11} />} {threadRelation(thread)}</small>
                     </span>
                     <time>{relativeTime(thread.updatedAt)}</time>
                   </button>
-                  <button className="thread-row-fork" disabled={busy || isThreadActive(thread)} onClick={() => void forkThread(thread)} title="Fork 会话" aria-label={`Fork ${thread.name || thread.preview || "会话"}`}><GitFork size={14} /></button>
+                  <div className="thread-row-actions">
+                    <button disabled={busy || isThreadActive(thread)} onClick={() => void forkThread(thread)} title="Fork 会话" aria-label={`Fork ${thread.name || thread.preview || "会话"}`}><GitFork size={14} /></button>
+                    {!isChatThread(thread) && <button disabled={busy || isThreadActive(thread)} onClick={() => void forkThread(thread, false, true)} title="Fork 到新 worktree" aria-label={`Worktree Fork ${thread.name || thread.preview || "会话"}`}><GitBranch size={14} /></button>}
+                    <button className="danger" disabled={busy || isThreadActive(thread)} onClick={() => void deleteThread(thread)} title="删除会话" aria-label={`删除 ${thread.name || thread.preview || "会话"}`}><Trash2 size={14} /></button>
+                  </div>
                 </div>
               ))}
             </section>;
@@ -917,7 +961,7 @@ export default function App() {
           <button className="icon-button mobile-only" onClick={() => setSidebarOpen(true)} aria-label="打开侧边栏"><Menu size={21} /></button>
           <div className="topbar-title">
             <strong>{selected?.name || selected?.preview || "选择一个任务"}</strong>
-            {selected && <small>{selectedIsChat ? "独立聊天 Session" : selected.cwd}</small>}
+            {selected && <small>{selectedIsChat ? "独立聊天 Session" : threadRelation(selected, true)}</small>}
           </div>
           <select className="machine-select" value={selectedMachineId} onChange={(event) => void selectMachine(event.target.value)} aria-label="Codex 机器"><option value="">选择机器</option>{machines.map((machine) => <option key={machine.id} value={machine.id}>{machine.online ? "●" : "○"} {machine.name}</option>)}</select>
           {selected && !selectedIsChat && <select className="project-select" value={selected.projectId ?? ""} onChange={(event) => void assignProject(event.target.value)} aria-label="所属项目"><option value="">按目录归类</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select>}
@@ -989,7 +1033,7 @@ export default function App() {
       {sideThread && <aside className="side-chat">
         <header className="side-chat-header"><div><span>侧边聊天</span><strong>{sideThread.name || sideThread.preview || "Fork"}</strong></div><button className="icon-button" onClick={closeSideThread} aria-label="关闭侧边聊天"><X size={18} /></button></header>
         <section className="side-timeline" ref={sideTimelineRef}>
-          {(sideThread.turns ?? []).flatMap((turn) => turn.items ?? []).map((item, index) => <TimelineItem item={item} threadId={sideThread.id} openFile={previewFile} openImage={(src, alt) => setZoomedImage({ src, alt })} key={item.id ?? `side-${item.type}-${index}`} />)}
+          {(sideThread.turns ?? []).filter((turn) => !sideHiddenTurnIds.has(turn.id)).flatMap((turn) => turn.items ?? []).map((item, index) => <TimelineItem item={item} threadId={sideThread.id} openFile={previewFile} openImage={(src, alt) => setZoomedImage({ src, alt })} key={item.id ?? `side-${item.type}-${index}`} />)}
           {sideOptimistic.map((message) => <OptimisticUserMessage key={message.id} message={message} edit={() => editFailedMessage(message, true)} />)}
           {sideLiveText && <article className="timeline-item assistant live"><div className="avatar"><Bot size={17} /></div><div className="bubble markdown"><MarkdownContent text={sideLiveText} threadId={sideThread.id} openFile={previewFile} openImage={(src, alt) => setZoomedImage({ src, alt })} /><span className="cursor" /></div></article>}
           {sideRunning && !sideLiveText && <ActivityIndicator label={requests.some((request) => requestThreadId(request) === sideThread.id) ? "等待你的确认" : activityLabels[sideThread.id] ?? "Codex 正在处理"} waiting={requests.some((request) => requestThreadId(request) === sideThread.id)} />}
@@ -1314,6 +1358,18 @@ function shortPath(path: string): string {
   return parts.slice(-2).join("/") || path;
 }
 
+function threadRelation(thread: Thread, full = false): string {
+  if (thread.conversationKind === "side") return `侧边 · ${thread.branch ?? thread.gitInfo?.branch ?? shortPath(thread.cwd)}`;
+  const branch = thread.branch ?? thread.gitInfo?.branch;
+  if (thread.conversationKind === "worktree") {
+    const path = full ? thread.worktreePath ?? thread.cwd : shortPath(thread.worktreePath ?? thread.cwd);
+    const main = thread.mainRoot ? (full ? thread.mainRoot : shortPath(thread.mainRoot)) : "主目录";
+    return `${branch ?? "worktree"} · ${path} ← ${main}`;
+  }
+  const path = full ? thread.cwd : shortPath(thread.cwd);
+  return branch ? `${branch} · ${path}` : path;
+}
+
 function relativeTime(timestamp: number): string {
   const seconds = Math.max(0, Math.floor(Date.now() / 1000 - timestamp));
   if (seconds < 60) return "刚刚";
@@ -1393,9 +1449,10 @@ function groupThreads(threads: Thread[], projects: Project[]): ThreadGroup[] {
       continue;
     }
     const project = thread.projectId ? projectMap.get(thread.projectId) : undefined;
-    const id = project ? `project:${project.id}` : `cwd:${thread.cwd}`;
-    const name = project?.name ?? shortPath(thread.cwd);
-    const group = groups.get(id) ?? { id, name, threads: [], position: project?.position ?? Number.MAX_SAFE_INTEGER, kind: project ? "project" : "directory", root: project?.roots[0]?.path ?? thread.cwd, projectId: project?.id };
+    const relationshipRoot = thread.conversationKind === "worktree" && thread.mainRoot ? thread.mainRoot : thread.cwd;
+    const id = project ? `project:${project.id}` : `cwd:${relationshipRoot}`;
+    const name = project?.name ?? shortPath(relationshipRoot);
+    const group = groups.get(id) ?? { id, name, threads: [], position: project?.position ?? Number.MAX_SAFE_INTEGER, kind: project ? "project" : "directory", root: project?.roots[0]?.path ?? relationshipRoot, projectId: project?.id };
     group.threads.push(thread);
     groups.set(id, group);
   }

@@ -74,12 +74,18 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .thread-row { width: 100%; min-height: 66px; border: 0; background: transparent; border-radius: 10px; display: flex; align-items: stretch; position: relative; }
 .thread-row:hover { background: #181d1a; }
 .thread-row.active { background: #222a23; }
-.thread-row-main { min-width: 0; flex: 1; border: 0; background: transparent; color: inherit; text-align: left; display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 8px 38px 8px 9px; cursor: pointer; }
-.thread-row-fork { width: 31px; height: 31px; padding: 0; position: absolute; right: 5px; bottom: 5px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); display: grid; place-items: center; cursor: pointer; opacity: 0; }
-.thread-row:hover .thread-row-fork, .thread-row:focus-within .thread-row-fork { opacity: 1; }
-.thread-row-fork:hover { color: var(--accent); background: rgba(216,255,133,.08); }
+.thread-row-main { min-width: 0; flex: 1; border: 0; background: transparent; color: inherit; text-align: left; display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 8px 9px; cursor: pointer; }
+.thread-row-actions { position: absolute; right: 5px; bottom: 4px; display: flex; padding-left: 18px; background: linear-gradient(90deg, transparent, #181d1a 18px); opacity: 0; }
+.thread-row.active .thread-row-actions { background: linear-gradient(90deg, transparent, #222a23 18px); }
+.thread-row:hover .thread-row-actions, .thread-row:focus-within .thread-row-actions { opacity: 1; }
+.thread-row-actions button { width: 28px; height: 28px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted); display: grid; place-items: center; cursor: pointer; }
+.thread-row-actions button:hover { color: var(--accent); background: var(--panel-3); }
+.thread-row-actions button.danger:hover { color: var(--danger); }
 .thread-copy { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .thread-copy strong { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.thread-kind { margin-left: 6px; padding: 1px 5px; border-radius: 4px; font: 8px 'DM Mono', monospace; font-style: normal; vertical-align: 1px; }
+.thread-kind.side { color: #9fc8ff; background: rgba(143,199,255,.1); }
+.thread-kind.worktree { color: var(--accent); background: rgba(216,255,133,.1); }
 .thread-copy small { color: var(--muted); display: flex; align-items: center; gap: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thread-row time { color: #68726b; font: 10px 'DM Mono', monospace; align-self: start; padding-top: 5px; }
 .status-dot, .online-dot { width: 6px; height: 6px; border-radius: 50%; background: #58615b; }
@@ -337,7 +343,7 @@ select, input { color: var(--text); background: var(--panel-2); border: 1px soli
   .connect-card { padding: 24px; }
   .side-chat { position: fixed; inset: 0; width: auto; z-index: 40; }
   .file-layer { padding: 0; }.file-browser { width: 100vw; height: 100dvh; border: 0; border-radius: 0; }.file-browser-body { grid-template-columns: 42% minmax(0, 1fr); }
-  .thread-row-fork { opacity: 1; }
+  .thread-row-actions { opacity: 1; }
   .preview-meta small { display: none; }
 }
 

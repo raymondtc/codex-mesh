@@ -42,7 +42,12 @@ export interface Thread {
   meshId?: string;
   machineId?: string;
   modelProvider?: string;
-  gitInfo?: { branch?: string; repositoryUrl?: string } | null;
+  gitInfo?: { sha?: string | null; branch?: string | null; originUrl?: string | null } | null;
+  conversationKind?: "standard" | "side" | "fork" | "worktree";
+  parentRemoteThreadId?: string | null;
+  mainRoot?: string | null;
+  worktreePath?: string | null;
+  branch?: string | null;
 }
 
 export interface Machine {

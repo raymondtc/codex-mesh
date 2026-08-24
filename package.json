@@ -11,6 +11,7 @@
     "check": "npm run check -w server && npm run check -w web && npm run check -w codex-mesh",
     "e2e:control": "npm run build && node scripts/control-plane-e2e.mjs",
     "e2e:local": "node scripts/local-e2e.mjs",
+    "e2e:worktree": "npm run build -w server && node scripts/worktree-e2e.mjs",
     "protocol:generate": "codex app-server generate-ts --experimental --out protocol"
   },
   "devDependencies": {

@@ -76,6 +76,10 @@ try {
   const threads = await browser.call("thread/list", {});
   const conversation = threads.data[0];
   assert(conversation.meshId && conversation.machineId === pairResponse.body.machineId, "thread did not receive a stable Mesh route id");
+  const metadata = await browser.call("bridge/conversation/metadata/update", { threadId: conversation.id, kind: "side", parentRemoteThreadId: "source-thread" });
+  assert(metadata.updated === true, "conversation relationship metadata was not persisted");
+  const relatedConversation = (await browser.call("thread/list", {})).data[0];
+  assert(relatedConversation.conversationKind === "side" && relatedConversation.parentRemoteThreadId === "source-thread", "conversation relationship metadata was not decorated");
   const resolved = await browser.call("bridge/conversation/resolve", { conversationId: conversation.meshId });
   assert(resolved.thread.id === "remote-thread-e2e", "stable conversation route did not resolve");
 
@@ -109,7 +113,7 @@ try {
     database: "pglite",
     auth: { firstUserAdmin: true, userIsolation: true, roleManagement: true },
     pairing: { oneTimeCode: true, outboundAgent: true, revoke: true },
-    conversation: { meshId: conversation.meshId, deepLink: true },
+    conversation: { meshId: conversation.meshId, deepLink: true, relationshipMetadata: true },
   }, null, 2));
 } catch (error) {
   if (output) process.stderr.write(output);
