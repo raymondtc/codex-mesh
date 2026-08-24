@@ -62,6 +62,12 @@ interface UserSettings {
 }
 
 const REASONING_EFFORTS: ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+const SLASH_COMMANDS = [
+  { command: "/fork", label: "Fork 并切换", detail: "复制当前历史为一个新任务" },
+  { command: "/side", label: "侧边聊天", detail: "Fork 到右侧并行探索" },
+  { command: "/new", label: "新建任务", detail: "从当前目录创建空任务" },
+  { command: "/project", label: "新建项目", detail: "以当前目录创建 Codex Project" },
+] as const;
 
 interface FileEntry {
   name: string;
@@ -140,6 +146,7 @@ export default function App() {
   const [effort, setEffort] = useState<ReasoningEffort>("high");
   const [permission, setPermission] = useState<PermissionMode>("workspace-write");
   const [draft, setDraft] = useState("");
+  const [slashCommandIndex, setSlashCommandIndex] = useState(0);
   const [liveText, setLiveText] = useState("");
   const [sideLiveText, setSideLiveText] = useState("");
   const [sideDraft, setSideDraft] = useState("");
@@ -577,9 +584,9 @@ export default function App() {
     }
   }
 
-  async function sendTurn() {
-    if (!selected || !draft.trim() || selectedSending) return;
-    const message = draft.trim();
+  async function sendTurn(overrideMessage?: string) {
+    const message = (overrideMessage ?? draft).trim();
+    if (!selected || !message || selectedSending) return;
     if (message === "/fork") {
       setDraft("");
       await forkThread(selected);
@@ -947,8 +954,14 @@ export default function App() {
               {goal && <GoalPill goal={goal} open={() => { setGoalObjective(goal.objective); setGoalBudget(goal.tokenBudget?.toString() ?? ""); setShowGoal(true); }} />}
               {requests.filter((request) => requestThreadId(request) !== sideThread?.id).map((request) => <ApprovalCard key={String(request.id)} request={request} resolve={(result) => resolveRequest(request, result)} />)}
               <div className="composer">
-                {draft.startsWith("/") && <CommandMenu choose={(command) => setDraft(command)} />}
-                <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => {
+                {draft.startsWith("/") && <CommandMenu selectedIndex={slashCommandIndex} choose={(command) => void sendTurn(command)} />}
+                <textarea value={draft} onChange={(event) => { const next = event.target.value; if (next.startsWith("/") && !draft.startsWith("/")) setSlashCommandIndex(0); setDraft(next); }} onKeyDown={(event) => {
+                  if (draft.startsWith("/") && !event.nativeEvent.isComposing) {
+                    if (event.key === "ArrowDown") { event.preventDefault(); setSlashCommandIndex((current) => (current + 1) % SLASH_COMMANDS.length); return; }
+                    if (event.key === "ArrowUp") { event.preventDefault(); setSlashCommandIndex((current) => (current - 1 + SLASH_COMMANDS.length) % SLASH_COMMANDS.length); return; }
+                    if (event.key === "Escape") { event.preventDefault(); setDraft(""); setSlashCommandIndex(0); return; }
+                    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendTurn(SLASH_COMMANDS[slashCommandIndex].command); return; }
+                  }
                   if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendTurn(); }
                 }} placeholder="给 Codex 发送后续指令…" rows={2} />
                 <div className="composer-actions">
@@ -1202,14 +1215,8 @@ function ApprovalCard({ request, resolve }: { request: ServerRequest; resolve: (
   return <div className="approval-card"><div className="approval-title"><ShieldAlert size={18} /><strong>{isFile ? "批准文件变更" : "批准命令执行"}</strong></div>{reason && <p>{reason}</p>}{command && <pre>{command}</pre>}<div className="approval-actions"><button onClick={() => resolve({ decision: "decline" })}>拒绝</button><button onClick={() => resolve({ decision: "acceptForSession" })}>本会话允许</button><button className="primary compact" onClick={() => resolve({ decision: "accept" })}>允许一次</button></div></div>;
 }
 
-function CommandMenu({ choose }: { choose: (command: string) => void }) {
-  const commands = [
-    { command: "/fork", label: "Fork 并切换", detail: "复制当前历史为一个新任务" },
-    { command: "/side", label: "侧边聊天", detail: "Fork 到右侧并行探索" },
-    { command: "/new", label: "新建任务", detail: "从当前目录创建空任务" },
-    { command: "/project", label: "新建项目", detail: "以当前目录创建 Codex Project" },
-  ];
-  return <div className="command-menu">{commands.map((item) => <button type="button" key={item.command} onClick={() => choose(item.command)}><code>{item.command}</code><span><strong>{item.label}</strong><small>{item.detail}</small></span></button>)}</div>;
+function CommandMenu({ selectedIndex, choose }: { selectedIndex: number; choose: (command: string) => void }) {
+  return <div className="command-menu" role="listbox" aria-label="Slash 命令">{SLASH_COMMANDS.map((item, index) => <button type="button" role="option" aria-selected={index === selectedIndex} className={index === selectedIndex ? "selected" : ""} key={item.command} onMouseEnter={() => { /* Keep keyboard selection stable while the pointer passes over the menu. */ }} onClick={() => choose(item.command)}><code>{item.command}</code><span><strong>{item.label}</strong><small>{item.detail}</small></span>{index === selectedIndex && <kbd>↵</kbd>}</button>)}</div>;
 }
 
 function DiffView({ diff }: { diff: string }) {

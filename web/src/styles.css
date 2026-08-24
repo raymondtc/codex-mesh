@@ -181,8 +181,10 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .goal-pill small { color: var(--muted); font-size: 9px; }
 .composer { background: #171c19; border: 1px solid #343d36; box-shadow: 0 16px 42px rgba(0,0,0,.28); border-radius: 15px; padding: 10px; }
 .command-menu { margin: -2px -2px 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); display: grid; gap: 3px; }
-.command-menu button { border: 0; border-radius: 8px; background: transparent; padding: 7px 8px; display: grid; grid-template-columns: 70px 1fr; gap: 8px; text-align: left; cursor: pointer; }
-.command-menu button:hover { background: var(--panel-3); }
+.command-menu button { border: 0; border-radius: 8px; background: transparent; padding: 7px 8px; display: grid; grid-template-columns: 70px minmax(0, 1fr) 24px; gap: 8px; text-align: left; cursor: pointer; }
+.command-menu button:hover, .command-menu button.selected { background: var(--panel-3); }
+.command-menu button.selected { box-shadow: inset 2px 0 var(--accent); }
+.command-menu kbd { align-self: center; color: var(--accent); font: 10px 'DM Mono', monospace; text-align: center; }
 .command-menu code { color: var(--accent); font-size: 11px; }
 .command-menu span { display: flex; flex-direction: column; gap: 2px; }
 .command-menu strong { font-size: 11px; }
