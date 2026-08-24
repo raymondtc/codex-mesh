@@ -1,4 +1,5 @@
 import { betterAuth } from "better-auth";
+import { admin } from "better-auth/plugins";
 import { drizzleAdapter } from "@better-auth/drizzle-adapter";
 import { db } from "./db/database.js";
 import { schema } from "./db/schema.js";
@@ -26,6 +27,7 @@ export const auth = betterAuth({
     updateAge: 60 * 60 * 24,
   },
   trustedOrigins: (process.env.TRUSTED_ORIGINS ?? baseURL).split(",").map((value) => value.trim()).filter(Boolean),
+  plugins: [admin({ adminRoles: ["admin"], defaultRole: "user" })],
 });
 
 export type AuthSession = typeof auth.$Infer.Session;

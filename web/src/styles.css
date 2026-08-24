@@ -258,11 +258,19 @@ select, input { color: var(--text); background: var(--panel-2); border: 1px soli
 .machine-list article > span { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
 .machine-list article strong { font-size: 12px; }.machine-list article small { color: var(--muted); font-size: 9px; }
 .machine-list article > button { width: 30px; height: 30px; border: 0; border-radius: 7px; background: transparent; color: var(--danger); display: grid; place-items: center; cursor: pointer; }
+.user-modal { width: min(760px, 96vw); }
+.modal-error { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid rgba(255,141,122,.35); border-radius: 9px; background: rgba(255,141,122,.08); color: var(--danger); font-size: 11px; }.modal-error span { flex: 1; }.modal-error button { padding: 3px; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.user-create { display: grid; gap: 8px; margin-bottom: 4px; padding: 12px; border: 1px solid var(--border); border-radius: 11px; background: var(--panel-2); }
+.user-create > strong { font-size: 12px; }.user-create > div { display: flex; gap: 8px; }.user-create input { min-width: 0; flex: 1; }.user-create .primary { flex: 0 0 auto; }
 .user-list { display: grid; gap: 6px; max-height: 55vh; overflow-y: auto; }
-.user-list article { min-height: 52px; padding: 8px 9px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel-2); display: flex; align-items: center; gap: 10px; }
+.user-list article { min-height: 64px; padding: 9px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel-2); display: grid; grid-template-columns: minmax(150px, 1fr) auto; align-items: center; gap: 7px 10px; }
+.user-list article.banned { opacity: .72; border-color: rgba(255,141,122,.3); }
 .user-list article > span { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
-.user-list article strong { font-size: 12px; }.user-list article small { color: var(--muted); font-size: 9px; overflow: hidden; text-overflow: ellipsis; }
+.user-list article strong { font-size: 12px; }.user-list article strong em { margin-left: 6px; padding: 1px 5px; border-radius: 4px; background: var(--panel-3); color: var(--muted); font-size: 8px; font-style: normal; }.user-list article strong em.danger { color: var(--danger); background: rgba(255,141,122,.1); }.user-list article small { color: var(--muted); font-size: 9px; overflow: hidden; text-overflow: ellipsis; }
 .user-list select { width: auto; min-width: 88px; }
+.user-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 5px; }
+.user-actions button { min-height: 28px; padding: 0 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-3); color: var(--muted); cursor: pointer; font-size: 10px; }
+.user-actions button:hover { color: var(--text); }.user-actions button.danger { color: var(--danger); }
 .pairing-code { padding: 11px; border: 1px solid rgba(216,255,133,.25); border-radius: 10px; background: rgba(216,255,133,.05); display: grid; gap: 8px; }
 .pairing-code small { color: var(--muted); }.pairing-code code { overflow-wrap: anywhere; color: var(--accent); font-size: 10px; line-height: 1.55; }
 .pairing-code button { width: fit-content; border: 0; background: transparent; color: var(--accent); display: flex; align-items: center; gap: 5px; cursor: pointer; }

@@ -35,8 +35,8 @@ export async function ensureFirstUserAdmin(userId: string): Promise<void> {
   await queryDb.execute(sql`update "user" set "role" = 'admin' where "id" = ${userId} and not exists (select 1 from "user" where "role" = 'admin')`);
 }
 
-export async function listUsers(): Promise<Array<{ id: string; name: string; email: string; role: string; createdAt: Date }>> {
-  return queryDb.select({ id: user.id, name: user.name, email: user.email, role: user.role, createdAt: user.createdAt }).from(user).orderBy(user.createdAt);
+export async function listUsers(): Promise<Array<{ id: string; name: string; email: string; role: string; banned: boolean; banReason: string | null; createdAt: Date }>> {
+  return queryDb.select({ id: user.id, name: user.name, email: user.email, role: user.role, banned: user.banned, banReason: user.banReason, createdAt: user.createdAt }).from(user).orderBy(user.createdAt);
 }
 
 export async function getUserRole(userId: string): Promise<string | null> {

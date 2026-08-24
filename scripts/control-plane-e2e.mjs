@@ -99,6 +99,43 @@ try {
   });
   assert(roleUpdate.response.ok && roleUpdate.body.updated, "admin role update failed");
 
+  const managedCreate = await requestJson("/api/auth/admin/create-user", {
+    method: "POST",
+    headers: { cookie: admin.cookie, origin, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Managed", email: "managed@mesh.test", password: "managed-initial-password", role: "user" }),
+  });
+  assert(managedCreate.response.ok && managedCreate.body.user?.id, "admin could not create a user");
+  const managedId = managedCreate.body.user.id;
+  const passwordUpdate = await requestJson("/api/auth/admin/set-user-password", {
+    method: "POST", headers: { cookie: admin.cookie, origin, "content-type": "application/json" },
+    body: JSON.stringify({ userId: managedId, newPassword: "managed-updated-password" }),
+  });
+  assert(passwordUpdate.response.ok, "admin could not reset a user password");
+  const managedLogin = await requestJson("/api/auth/sign-in/email", {
+    method: "POST", headers: { origin, "content-type": "application/json" },
+    body: JSON.stringify({ email: "managed@mesh.test", password: "managed-updated-password" }),
+  });
+  const managedCookie = managedLogin.response.headers.get("set-cookie")?.split(";", 1)[0];
+  assert(managedLogin.response.ok && managedCookie, "managed user could not sign in with reset password");
+  const revokeManaged = await requestJson("/api/auth/admin/revoke-user-sessions", {
+    method: "POST", headers: { cookie: admin.cookie, origin, "content-type": "application/json" }, body: JSON.stringify({ userId: managedId }),
+  });
+  assert(revokeManaged.response.ok, "admin could not revoke user sessions");
+  const revokedMe = await requestJson("/api/me", { headers: { cookie: managedCookie } });
+  assert(revokedMe.response.status === 401, "revoked user session remained valid");
+  const banManaged = await requestJson("/api/auth/admin/ban-user", {
+    method: "POST", headers: { cookie: admin.cookie, origin, "content-type": "application/json" }, body: JSON.stringify({ userId: managedId, banReason: "E2E" }),
+  });
+  assert(banManaged.response.ok, "admin could not ban a user");
+  const unbanManaged = await requestJson("/api/auth/admin/unban-user", {
+    method: "POST", headers: { cookie: admin.cookie, origin, "content-type": "application/json" }, body: JSON.stringify({ userId: managedId }),
+  });
+  assert(unbanManaged.response.ok, "admin could not unban a user");
+  const removeManaged = await requestJson("/api/auth/admin/remove-user", {
+    method: "POST", headers: { cookie: admin.cookie, origin, "content-type": "application/json" }, body: JSON.stringify({ userId: managedId }),
+  });
+  assert(removeManaged.response.ok, "admin could not remove a user");
+
   const route = await fetch(`${origin}/thread/${conversation.meshId}`);
   const html = await route.text();
   assert(route.ok && route.headers.get("content-type")?.includes("text/html") && html.includes('<div id="root"></div>'), "conversation deep link did not return the SPA");
@@ -111,7 +148,7 @@ try {
   console.log(JSON.stringify({
     ok: true,
     database: "pglite",
-    auth: { firstUserAdmin: true, userIsolation: true, roleManagement: true },
+    auth: { firstUserAdmin: true, userIsolation: true, roleManagement: true, userLifecycleManagement: true },
     pairing: { oneTimeCode: true, outboundAgent: true, revoke: true },
     conversation: { meshId: conversation.meshId, deepLink: true, relationshipMetadata: true },
   }, null, 2));

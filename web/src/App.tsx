@@ -95,6 +95,8 @@ interface UserSummary {
   name: string;
   email: string;
   role: "admin" | "user";
+  banned: boolean;
+  banReason: string | null;
   createdAt: string;
 }
 
@@ -134,6 +136,11 @@ export default function App() {
   const [showUsers, setShowUsers] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [users, setUsers] = useState<UserSummary[]>([]);
+  const [newUserName, setNewUserName] = useState("");
+  const [newUserEmail, setNewUserEmail] = useState("");
+  const [newUserPassword, setNewUserPassword] = useState("");
+  const [userActionId, setUserActionId] = useState("");
+  const [userError, setUserError] = useState("");
   const [currentRole, setCurrentRole] = useState("");
   const [enrollment, setEnrollment] = useState<{ code: string; expiresAt: string } | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
@@ -803,6 +810,7 @@ export default function App() {
 
   async function openUsers() {
     setError("");
+    setUserError("");
     try {
       const response = await fetch("/api/users");
       const body = await response.json() as { data?: UserSummary[]; error?: string };
@@ -810,19 +818,51 @@ export default function App() {
       setUsers(body.data);
       setShowUsers(true);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setUserError(message); setError(message);
     }
   }
 
   async function setUserRole(userId: string, role: "admin" | "user") {
-    const response = await fetch(`/api/users/${encodeURIComponent(userId)}/role`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ role }),
-    });
-    const body = await response.json() as { updated?: boolean; error?: string };
-    if (!response.ok || !body.updated) { setError(body.error ?? "更新用户角色失败"); return; }
-    setUsers((current) => current.map((item) => item.id === userId ? { ...item, role } : item));
+    await runUserAction(userId, "/api/auth/admin/set-role", { userId, role }, "更新用户角色失败");
+  }
+
+  async function createUser() {
+    if (!newUserName.trim() || !newUserEmail.trim() || newUserPassword.length < 8) return;
+    setUserActionId("create");
+    try {
+      await adminRequest("/api/auth/admin/create-user", { name: newUserName.trim(), email: newUserEmail.trim(), password: newUserPassword, role: "user" });
+      setNewUserName(""); setNewUserEmail(""); setNewUserPassword("");
+      await openUsers();
+    } catch (reason) { setUserError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setUserActionId(""); }
+  }
+
+  async function resetUserPassword(item: UserSummary) {
+    const password = window.prompt(`为 ${item.email} 设置新密码（至少 8 位）`) ?? "";
+    if (password.length < 8) { if (password) setUserError("新密码至少需要 8 位"); return; }
+    await runUserAction(item.id, "/api/auth/admin/set-user-password", { userId: item.id, newPassword: password }, "重置密码失败");
+  }
+
+  async function toggleUserBan(item: UserSummary) {
+    if (item.banned) await runUserAction(item.id, "/api/auth/admin/unban-user", { userId: item.id }, "启用用户失败");
+    else {
+      const reason = window.prompt(`停用 ${item.email} 的原因`, "由管理员停用") ?? "";
+      if (!reason) return;
+      await runUserAction(item.id, "/api/auth/admin/ban-user", { userId: item.id, banReason: reason }, "停用用户失败");
+    }
+  }
+
+  async function removeUserAccount(item: UserSummary) {
+    if (!window.confirm(`永久删除用户 ${item.email}？\n其机器、会话和账户数据将一并删除，无法恢复。`)) return;
+    await runUserAction(item.id, "/api/auth/admin/remove-user", { userId: item.id }, "删除用户失败");
+  }
+
+  async function runUserAction(userId: string, path: string, body: Record<string, unknown>, fallback: string) {
+    setUserActionId(userId); setUserError("");
+    try { await adminRequest(path, body); await openUsers(); }
+    catch (reason) { setUserError(reason instanceof Error ? reason.message : fallback); }
+    finally { setUserActionId(""); }
   }
 
   async function saveDefaultSettings() {
@@ -1086,7 +1126,12 @@ export default function App() {
         <button className="primary" disabled={busy} onClick={() => void saveDefaultSettings()}>{busy ? "保存中…" : "保存默认设置"}</button>
       </section></div>}
 
-      {showUsers && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="用户管理"><section className="modal user-modal"><header><Users size={20} /><h2>用户管理</h2><button className="icon-button" onClick={() => setShowUsers(false)}><X size={18} /></button></header><p className="muted">管理员可以查看账户并分配管理权限。</p><div className="user-list">{users.map((item) => <article key={item.id}><span><strong>{item.name}</strong><small>{item.email}</small></span><select value={item.role} disabled={item.id === currentUserId} onChange={(event) => void setUserRole(item.id, event.target.value as "admin" | "user")} aria-label={`${item.email} 的角色`}><option value="user">用户</option><option value="admin">管理员</option></select></article>)}</div></section></div>}
+      {showUsers && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="用户管理"><section className="modal user-modal">
+        <header><Users size={20} /><h2>用户管理</h2><button className="icon-button" onClick={() => setShowUsers(false)}><X size={18} /></button></header>
+        {userError && <div className="modal-error"><ShieldAlert size={15} /><span>{userError}</span><button onClick={() => setUserError("")}><X size={14} /></button></div>}
+        <div className="user-create"><strong>创建用户</strong><div><input value={newUserName} onChange={(event) => setNewUserName(event.target.value)} placeholder="姓名" /><input type="email" value={newUserEmail} onChange={(event) => setNewUserEmail(event.target.value)} placeholder="邮箱" /></div><div><input type="password" value={newUserPassword} onChange={(event) => setNewUserPassword(event.target.value)} placeholder="初始密码（至少 8 位）" /><button className="primary compact" disabled={userActionId === "create" || !newUserName.trim() || !newUserEmail.trim() || newUserPassword.length < 8} onClick={() => void createUser()}>{userActionId === "create" ? "创建中…" : "创建"}</button></div></div>
+        <div className="user-list">{users.map((item) => <article className={item.banned ? "banned" : ""} key={item.id}><span><strong>{item.name}{item.id === currentUserId && <em>当前</em>}{item.banned && <em className="danger">已停用</em>}</strong><small>{item.email}{item.banReason ? ` · ${item.banReason}` : ""}</small></span><select value={item.role} disabled={item.id === currentUserId || userActionId === item.id} onChange={(event) => void setUserRole(item.id, event.target.value as "admin" | "user")} aria-label={`${item.email} 的角色`}><option value="user">用户</option><option value="admin">管理员</option></select><div className="user-actions"><button disabled={userActionId === item.id} onClick={() => void resetUserPassword(item)}>密码</button><button disabled={item.id === currentUserId || userActionId === item.id} onClick={() => void runUserAction(item.id, "/api/auth/admin/revoke-user-sessions", { userId: item.id }, "撤销会话失败")}>下线</button><button disabled={item.id === currentUserId || userActionId === item.id} onClick={() => void toggleUserBan(item)}>{item.banned ? "启用" : "停用"}</button><button className="danger" disabled={item.id === currentUserId || userActionId === item.id} onClick={() => void removeUserAccount(item)}>删除</button></div></article>)}</div>
+      </section></div>}
 
       {showNewProject && (
         <div className="modal-layer" role="dialog" aria-modal="true" aria-label="新建项目">
@@ -1150,6 +1195,13 @@ function permissionDescription(permission: PermissionMode): string {
   if (permission === "read-only") return "Codex 可以读取文件；需要修改文件或执行越界操作时会请求批准。";
   if (permission === "full-access") return "Codex 可不经询问访问系统和网络。仅在可信任务中使用。";
   return "Codex 可以修改当前工作区；越过工作区边界时会请求批准。";
+}
+
+async function adminRequest(path: string, body: Record<string, unknown>): Promise<unknown> {
+  const response = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const result = await response.json().catch(() => ({})) as { message?: string; error?: string };
+  if (!response.ok) throw new Error(result.message ?? result.error ?? `管理操作失败（${response.status}）`);
+  return result;
 }
 
 function AuthPage() {
