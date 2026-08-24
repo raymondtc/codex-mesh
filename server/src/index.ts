@@ -209,7 +209,9 @@ async function handleBrowserMessage(ws: WebSocket, raw: WebSocket.RawData): Prom
       const result = await handleBrowserRpc(context, message.method, message.params);
       send(ws, { type: "rpcResult", id: message.id, result });
     } catch (error) {
-      send(ws, { type: "rpcResult", id: message.id, error: { message: error instanceof Error ? error.message : String(error) } });
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error(`[browser-rpc] ${message.method}: ${detail}`);
+      send(ws, { type: "rpcResult", id: message.id, error: { message: detail } });
     }
     return;
   }

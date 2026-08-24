@@ -521,7 +521,7 @@ export default function App() {
       const result = await bridge.call<{ project: Project }>("project/create", {
         name: projectName.trim(),
         roots: [{ path: projectRoot.trim() }],
-        idempotencyKey: crypto.randomUUID(),
+        idempotencyKey: clientId(),
       });
       setProjects((current) => [...current, result.project].sort((a, b) => a.position - b.position));
       setNewProjectId(result.project.id);
@@ -601,7 +601,7 @@ export default function App() {
       setShowNewProject(true);
       return;
     }
-    const optimisticId = crypto.randomUUID();
+    const optimisticId = clientId();
     setDraft("");
     setBusy(true);
     setLiveText("");
@@ -637,7 +637,7 @@ export default function App() {
   async function sendSideTurn() {
     if (!sideThread || !sideDraft.trim() || sideBusy) return;
     const message = sideDraft.trim();
-    const optimisticId = crypto.randomUUID();
+    const optimisticId = clientId();
     setSideDraft("");
     setSideBusy(true);
     setSideLiveText("");
@@ -1071,6 +1071,16 @@ function threadPermissionParams(permission: PermissionMode): { approvalPolicy: s
   if (permission === "read-only") return { approvalPolicy: "on-request", sandbox: "read-only" };
   if (permission === "full-access") return { approvalPolicy: "never", sandbox: "danger-full-access" };
   return { approvalPolicy: "on-request", sandbox: "workspace-write" };
+}
+
+function clientId(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((value) => value.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }
 
 function turnPermissionParams(permission: PermissionMode): { approvalPolicy: string; sandboxPolicy: Record<string, unknown> } {
