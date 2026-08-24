@@ -5,6 +5,7 @@
   "workspaces": ["server", "web", "agent"],
   "scripts": {
     "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w server\" \"npm run dev -w web\"",
+    "dev:lan": "set -a; . ./.env.lan; set +a; npm run dev",
     "build": "npm run build -w web && npm run build -w server && npm run build -w codex-mesh",
     "start": "npm run start -w server",
     "check": "npm run check -w server && npm run check -w web && npm run check -w codex-mesh",
