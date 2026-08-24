@@ -578,7 +578,7 @@ export default function App() {
   }
 
   async function sendTurn() {
-    if (!selected || !draft.trim() || busy) return;
+    if (!selected || !draft.trim() || selectedSending) return;
     const message = draft.trim();
     if (message === "/fork") {
       setDraft("");
@@ -949,7 +949,7 @@ export default function App() {
               <div className="composer">
                 {draft.startsWith("/") && <CommandMenu choose={(command) => setDraft(command)} />}
                 <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendTurn(); }
+                  if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendTurn(); }
                 }} placeholder="给 Codex 发送后续指令…" rows={2} />
                 <div className="composer-actions">
                   <div className="runtime-controls">
@@ -965,7 +965,7 @@ export default function App() {
                       {REASONING_EFFORTS.map((value) => <option value={value} key={value}>{value}</option>)}
                     </select>
                   </div>
-                  {running ? <button className="stop-button" onClick={() => void interruptTurn()}><CircleStop size={17} /> 停止</button> : <button className="send-button" disabled={!draft.trim() || busy} onClick={() => void sendTurn()} aria-label="发送"><Send size={18} /></button>}
+                  {running ? <button className="stop-button" onClick={() => void interruptTurn()}><CircleStop size={17} /> 停止</button> : <button className="send-button" disabled={!draft.trim() || selectedSending} onClick={() => void sendTurn()} aria-label="发送"><Send size={18} /></button>}
                 </div>
               </div>
             </section>
@@ -983,7 +983,7 @@ export default function App() {
         </section>
         <section className="side-composer-wrap">
           {requests.filter((request) => requestThreadId(request) === sideThread.id).map((request) => <ApprovalCard key={String(request.id)} request={request} resolve={(result) => resolveRequest(request, result)} />)}
-          <div className="composer"><textarea value={sideDraft} disabled={sideRunning} onChange={(event) => setSideDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void sendSideTurn(); } }} placeholder={sideRunning ? "Codex 正在处理…" : "在 Fork 中继续探索…"} rows={2} /><div className="composer-actions"><small>独立 Fork，不影响主对话</small><button className="send-button" disabled={!sideDraft.trim() || sideBusy || sideRunning} onClick={() => void sendSideTurn()} aria-label="发送侧边消息"><Send size={17} /></button></div></div>
+          <div className="composer"><textarea value={sideDraft} disabled={sideRunning} onChange={(event) => setSideDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendSideTurn(); } }} placeholder={sideRunning ? "Codex 正在处理…" : "在 Fork 中继续探索…"} rows={2} /><div className="composer-actions"><small>独立 Fork，不影响主对话</small><button className="send-button" disabled={!sideDraft.trim() || sideBusy || sideRunning} onClick={() => void sendSideTurn()} aria-label="发送侧边消息"><Send size={17} /></button></div></div>
         </section>
       </aside>}
 
