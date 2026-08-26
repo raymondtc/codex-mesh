@@ -180,8 +180,10 @@ async function handleBrowserMessage(ws: WebSocket, raw: WebSocket.RawData): Prom
   let message: BrowserMessage;
   try { message = JSON.parse(String(raw)) as BrowserMessage; } catch { return ws.close(4400, "Invalid JSON"); }
   if (message.type === "rpc") {
+    const startedAt = Date.now();
     try {
       const result = await handleBrowserRpc(context, message.method, message.params);
+      if (message.method.startsWith("bridge/fs/")) console.log(`[rpc-timing] ${message.method} ${Date.now() - startedAt}ms`);
       send(ws, { type: "rpcResult", id: message.id, result });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);

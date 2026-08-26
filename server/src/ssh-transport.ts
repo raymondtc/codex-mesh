@@ -36,6 +36,7 @@ export class SshMachineTransport extends EventEmitter implements MachineTranspor
   private nextId = 1;
   private pending = new Map<number | string, PendingRequest>();
   private remoteStderr = "";
+  private threadRoots = new Map<string, Promise<string>>();
 
   constructor(private readonly config: SshHostConfig) { super(); }
 
@@ -160,9 +161,16 @@ export class SshMachineTransport extends EventEmitter implements MachineTranspor
   }
 
   private async threadRoot(threadId: string): Promise<string> {
-    const result = await this.requestRaw("thread/read", { threadId, includeTurns: false }) as { thread?: { cwd?: string } };
-    if (!result.thread?.cwd) throw new Error("Thread working directory is unavailable");
-    return result.thread.cwd;
+    const existing = this.threadRoots.get(threadId);
+    if (existing) return existing;
+    const pending = (async () => {
+      const result = await this.requestRaw("thread/read", { threadId, includeTurns: false }) as { thread?: { cwd?: string } };
+      if (!result.thread?.cwd) throw new Error("Thread working directory is unavailable");
+      return (await this.execText(`realpath -- ${shellQuote(result.thread.cwd)}`)).trim();
+    })();
+    this.threadRoots.set(threadId, pending);
+    try { return await pending; }
+    catch (error) { if (this.threadRoots.get(threadId) === pending) this.threadRoots.delete(threadId); throw error; }
   }
 
   private async fileRequest(method: string, params: unknown): Promise<unknown> {
@@ -175,7 +183,7 @@ export class SshMachineTransport extends EventEmitter implements MachineTranspor
     if (method === "bridge/fs/writeFile") {
       const data = decodeUpload(input.dataBase64);
       if (!requested || requested === ".") throw new Error("Invalid upload path");
-      const canonicalRoot = (await this.execText(`realpath -- ${shellQuote(root)}`)).trim();
+      const canonicalRoot = root;
       if (pathPosix.dirname(requested) === ".codex-mesh-uploads") await this.execText(`[ ! -L ${shellQuote(`${canonicalRoot}/.codex-mesh-uploads`)} ] && mkdir -p -m 700 -- ${shellQuote(`${canonicalRoot}/.codex-mesh-uploads`)}`);
       const parent = (await this.execText(`realpath -- ${shellQuote(pathPosix.resolve(root, pathPosix.dirname(requested)))}`)).trim();
       if (parent !== canonicalRoot && !parent.startsWith(`${canonicalRoot}/`)) throw new Error("File path is outside the thread working directory");
@@ -184,7 +192,7 @@ export class SshMachineTransport extends EventEmitter implements MachineTranspor
       return { path: pathPosix.relative(canonicalRoot, target), absolutePath: target, size: data.length };
     }
     const target = pathPosix.resolve(root, requested);
-    const canonicalRoot = (await this.execText(`realpath -- ${shellQuote(root)}`)).trim();
+    const canonicalRoot = root;
     const canonicalTarget = (await this.execText(`realpath -- ${shellQuote(target)}`)).trim();
     if (canonicalTarget !== canonicalRoot && !canonicalTarget.startsWith(`${canonicalRoot}/`)) {
       this.emit("stderr", `[fs-scope] rejected target=${JSON.stringify(canonicalTarget)} threadRoot=${JSON.stringify(canonicalRoot)}\n`);
@@ -202,10 +210,12 @@ export class SshMachineTransport extends EventEmitter implements MachineTranspor
       }
       return { path: relativePath, entries };
     }
-    const size = Number((await this.execText(`stat -c %s -- ${shellQuote(canonicalTarget)}`)).trim());
+    const payload = await this.execText(`stat -c %s -- ${shellQuote(canonicalTarget)} && base64 -w0 -- ${shellQuote(canonicalTarget)}`, 12 * 1024 * 1024);
+    const separator = payload.indexOf("\n");
+    if (separator < 1) throw new Error("Remote file metadata is invalid");
+    const size = Number(payload.slice(0, separator));
     if (!Number.isFinite(size) || size > 8 * 1024 * 1024) throw new Error(`File exceeds ${method === "bridge/fs/downloadFile" ? "download" : "preview"} limit (8 MB)`);
-    const encoded = await this.execText(`base64 -w0 -- ${shellQuote(canonicalTarget)}`, 12 * 1024 * 1024);
-    const data = Buffer.from(encoded.trim(), "base64");
+    const data = Buffer.from(payload.slice(separator + 1).trim(), "base64");
     const mimeType = imageMimeType(pathPosix.extname(canonicalTarget).toLowerCase());
     if (method === "bridge/fs/downloadFile") return { path: relativePath, size, dataBase64: data.toString("base64"), mimeType: mimeType ?? "application/octet-stream" };
     if (mimeType) return { path: relativePath, kind: "image", mimeType, size, dataUrl: `data:${mimeType};base64,${data.toString("base64")}` };

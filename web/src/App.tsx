@@ -826,11 +826,12 @@ export default function App() {
   async function previewFile(threadId: string, path: string) {
     setFileBusy(true);
     setError("");
+    setFileThreadId(threadId);
+    setFilePreview(null);
+    setShowFiles(true);
     try {
       const result = await bridge.call<FilePreview>("bridge/fs/readFile", { threadId, path });
-      setFileThreadId(threadId);
       setFilePreview(result);
-      setShowFiles(true);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
