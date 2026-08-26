@@ -90,6 +90,9 @@ export class ReverseSshRelay {
 
   private handleConnection(connection: Connection, sourceIp: string): void {
     let authenticated: { machineId: string; tenantId: string } | undefined;
+    connection.on("error", () => {
+      if (authenticated) this.remove(authenticated.machineId, connection);
+    });
     connection.on("authentication", (context) => {
       if (context.method !== "publickey" || !isMachineId(context.username)) return context.reject(["publickey"]);
       void this.authenticate(context.username, context).then((identity) => {
@@ -117,7 +120,6 @@ export class ReverseSshRelay {
         accept?.(bindPort);
       });
       connection.on("close", () => this.remove(identity.machineId, connection));
-      connection.on("error", () => this.remove(identity.machineId, connection));
     });
   }
 
