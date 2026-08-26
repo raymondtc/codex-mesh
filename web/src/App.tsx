@@ -135,9 +135,31 @@ interface ZoomedImage {
   alt: string;
 }
 
+interface TunnelSetup {
+  machineId: string;
+  privateKey: string;
+  knownHostsLine: string;
+  command: string;
+  relayHost: string;
+  relayPort: number;
+  relayHostKeySha256: string;
+}
+
 function authorizedKeyScript(publicKey: string): string {
   const quoted = `'${publicKey.replaceAll("'", `'"'"'`)}'`;
   return `umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; grep -qxF ${quoted} ~/.ssh/authorized_keys || printf '%s\\n' ${quoted} >> ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys`;
+}
+
+function reverseHostPrepareScript(publicKey: string): string {
+  return `${authorizedKeyScript(publicKey)}\nprintf '\\n将下面的 SHA256 指纹粘贴回 Codex Mesh：\\n'\nssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256`;
+}
+
+function tunnelInstallScript(setup: TunnelSetup): string {
+  return `sudo sh -c 'umask 077; install -d -m 700 /etc/codex-mesh; cat > /etc/codex-mesh/tunnel_ed25519 <<"KEY"\n${setup.privateKey.trimEnd()}\nKEY\ncat > /etc/codex-mesh/relay_known_hosts <<"HOST"\n${setup.knownHostsLine}\nHOST\nchmod 600 /etc/codex-mesh/tunnel_ed25519 /etc/codex-mesh/relay_known_hosts'\nsudo ${setup.command}`;
+}
+
+function tunnelSystemdInstallScript(setup: TunnelSetup): string {
+  return `sudo sh -c 'umask 077; install -d -m 700 /etc/codex-mesh; cat > /etc/codex-mesh/tunnel_ed25519 <<"KEY"\n${setup.privateKey.trimEnd()}\nKEY\ncat > /etc/codex-mesh/relay_known_hosts <<"HOST"\n${setup.knownHostsLine}\nHOST\ncat > /etc/systemd/system/codex-mesh-tunnel.service <<"UNIT"\n[Unit]\nDescription=Codex Mesh reverse SSH tunnel\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=${setup.command}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\nUNIT\nchmod 600 /etc/codex-mesh/tunnel_ed25519 /etc/codex-mesh/relay_known_hosts\nsystemctl daemon-reload\nsystemctl enable --now codex-mesh-tunnel.service'`;
 }
 
 export default function App() {
@@ -166,10 +188,11 @@ export default function App() {
   const [sshPrivateKey, setSshPrivateKey] = useState("");
   const [sshPassphrase, setSshPassphrase] = useState("");
   const [sshFingerprint, setSshFingerprint] = useState("");
+  const [sshConnectionMode, setSshConnectionMode] = useState<"direct" | "reverse-ssh">("direct");
   const [generatedSshKey, setGeneratedSshKey] = useState<{ keyId: string; publicKey: string } | null>(null);
   const [sshSetupError, setSshSetupError] = useState("");
   const [sshSetupBusy, setSshSetupBusy] = useState(false);
-  const [tunnelSetup, setTunnelSetup] = useState<{ machineId: string; privateKey: string; knownHostsLine: string; command: string; relayHostKeySha256: string } | null>(null);
+  const [tunnelSetup, setTunnelSetup] = useState<TunnelSetup | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selected, setSelected] = useState<Thread | null>(null);
@@ -909,28 +932,35 @@ export default function App() {
   async function createSshHost() {
     setSshSetupBusy(true); setSshSetupError("");
     try {
-      const machine = await bridge.call<Machine>("bridge/ssh/host/create", {
+      const machine = await bridge.call<Machine & { tunnelSetup?: TunnelSetup }>("bridge/ssh/host/create", {
         name: sshName, host: sshHost, port: Number(sshPort), username: sshUsername,
         hostKeySha256: sshFingerprint,
+        connectionMode: sshConnectionMode,
         ...(generatedSshKey ? { generatedKeyId: generatedSshKey.keyId } : { privateKey: sshPrivateKey, passphrase: sshPassphrase }),
       });
       await loadMachines();
       setShowSshForm(false); setGeneratedSshKey(null); setSshPrivateKey(""); setSshPassphrase(""); setSshFingerprint("");
-      await selectMachine(machine.id);
+      if (machine.tunnelSetup) setTunnelSetup(machine.tunnelSetup);
+      else await selectMachine(machine.id);
     } catch (reason) { setSshSetupError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setSshSetupBusy(false); }
   }
 
   async function removeMachine(machineId: string) {
-    if (!window.confirm("删除这台 SSH 主机？加密保存的私钥也会一并清除。")) return;
+    if (!window.confirm("删除这台机器？关联凭据也会一并清除。")) return;
     await bridge.call("bridge/machine/revoke", { machineId });
+    if (selectedMachineId === machineId) {
+      setSelectedMachineId("");
+      setSelected(null);
+      selectedIdRef.current = null;
+    }
     await loadMachines();
   }
 
   async function enableTunnel(machineId: string) {
     setSshSetupError("");
     try {
-      const setup = await bridge.call<{ machineId: string; privateKey: string; knownHostsLine: string; command: string; relayHostKeySha256: string }>("bridge/ssh/tunnel/enable", { machineId });
+      const setup = await bridge.call<TunnelSetup>("bridge/ssh/tunnel/enable", { machineId });
       setTunnelSetup(setup);
       await loadMachines();
     } catch (error) { setSshSetupError(error instanceof Error ? error.message : String(error)); }
@@ -1248,21 +1278,20 @@ export default function App() {
         </div>
       )}
 
-      {showMachines && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="SSH 主机"><section className="modal machine-modal">
-        <header><MonitorCog size={20} /><h2>SSH 主机</h2><button className="icon-button" onClick={() => { setTunnelSetup(null); setShowMachines(false); }}><X size={18} /></button></header>
-        <p className="muted">控制面按需通过 SSH 启动远端 Codex，不需要宿主机常驻 Agent。</p>
-        <div className="machine-list">{machines.map((machine) => <article key={machine.id}><i className={`online-dot ${machine.online ? "" : "offline"}`} /><span><strong>{machine.name}</strong><small>{machine.kind === "local" ? "控制面本机" : `${machine.sshUsername}@${machine.sshHost}:${machine.sshPort ?? 22} · ${machine.connectionMode === "reverse-ssh" ? "反向隧道" : "直连"} · ${machine.online ? "已连接" : "按需连接"}`}</small></span>{machine.kind === "ssh" && <><button onClick={() => void (machine.connectionMode === "reverse-ssh" ? disableTunnel(machine.id) : enableTunnel(machine.id))}>{machine.connectionMode === "reverse-ssh" ? "停用隧道" : "启用隧道"}</button><button onClick={() => void removeMachine(machine.id)} aria-label="删除 SSH 主机"><Trash2 size={14} /></button></>}</article>)}</div>
-        {tunnelSetup && <div className="pairing-code"><small>以下内容只显示到关闭本窗口。请在宿主机保存私钥和 known_hosts，再由 systemd/launchd 保活命令。Relay 指纹：{tunnelSetup.relayHostKeySha256}</small><code>{`# /etc/codex-mesh/tunnel_ed25519\n${tunnelSetup.privateKey}\n# /etc/codex-mesh/relay_known_hosts\n${tunnelSetup.knownHostsLine}\n# tunnel command\n${tunnelSetup.command}`}</code><button onClick={() => void navigator.clipboard.writeText(`umask 077\nsudo install -d -m 700 /etc/codex-mesh\nsudo tee /etc/codex-mesh/tunnel_ed25519 >/dev/null <<'KEY'\n${tunnelSetup.privateKey}KEY\nsudo chmod 600 /etc/codex-mesh/tunnel_ed25519\nsudo tee /etc/codex-mesh/relay_known_hosts >/dev/null <<'HOST'\n${tunnelSetup.knownHostsLine}\nHOST\n${tunnelSetup.command}`)}><Copy size={14} /> 复制安装内容</button></div>}
-        {!showSshForm ? <button className="primary" onClick={() => setShowSshForm(true)}><Plus size={16} /> 添加 SSH 主机</button> : <div className="ssh-host-form">
+      {showMachines && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="机器"><section className="modal machine-modal">
+        <header><MonitorCog size={20} /><h2>机器</h2><button className="icon-button" onClick={() => { setTunnelSetup(null); setShowMachines(false); }}><X size={18} /></button></header>
+        <div className="machine-list">{machines.map((machine) => <article key={machine.id}><i className={`online-dot ${machine.online ? "" : "offline"}`} /><span><strong>{machine.name}</strong><small>{machine.kind === "local" ? "控制面本机" : machine.kind === "ssh" ? `${machine.sshUsername}@${machine.sshHost}:${machine.sshPort ?? 22} · ${machine.connectionMode === "reverse-ssh" ? "反向隧道" : "直连"} · ${machine.online ? "已连接" : "未连接"}` : `旧版 ${machine.kind} 配对记录`}</small></span>{machine.kind === "ssh" && <button onClick={() => void (machine.connectionMode === "reverse-ssh" ? disableTunnel(machine.id) : enableTunnel(machine.id))}>{machine.connectionMode === "reverse-ssh" ? "停用隧道" : "改用隧道"}</button>}{machine.kind !== "local" && <button onClick={() => void removeMachine(machine.id)} aria-label={`删除 ${machine.name}`}><Trash2 size={14} /></button>}</article>)}</div>
+        {tunnelSetup && <div className="pairing-code"><small>在宿主机执行。实际 Relay：{tunnelSetup.relayHost}:{tunnelSetup.relayPort}；指纹 {tunnelSetup.relayHostKeySha256}。隧道私钥只显示这一次。</small><code>{tunnelSetup.command}</code><div className="tunnel-copy-actions"><button onClick={() => void navigator.clipboard.writeText(tunnelSystemdInstallScript(tunnelSetup))}><Copy size={14} /> Linux 后台安装</button><button onClick={() => void navigator.clipboard.writeText(tunnelInstallScript(tunnelSetup))}><Copy size={14} /> macOS / 临时前台运行</button></div></div>}
+        {!showSshForm ? <button className="primary" onClick={() => { setTunnelSetup(null); setShowSshForm(true); }}><Plus size={16} /> 添加 SSH 主机</button> : <div className="ssh-host-form">
+          <div className="ssh-mode-select"><button className={sshConnectionMode === "direct" ? "selected" : ""} onClick={() => { setSshConnectionMode("direct"); setSshFingerprint(""); }}>直连 SSH</button><button className={sshConnectionMode === "reverse-ssh" ? "selected" : ""} onClick={() => { setSshConnectionMode("reverse-ssh"); setSshFingerprint(""); }}>反向隧道</button></div>
+          <small className="mode-hint">{sshConnectionMode === "direct" ? "控制面能访问该主机时使用；保存前会实际连接验证。" : "宿主机主动连接公网 Relay；适合 NAT、内网或无入站端口的机器。"}</small>
           <label className="ssh-config-import">从 OpenSSH config 导入主机参数<input type="file" accept=".ssh-config,.conf,text/plain" onChange={(event) => { const file = event.target.files?.[0]; if (file) void importSshConfig(file); }} /></label>
           <div className="ssh-form-grid"><label>名称<input value={sshName} onChange={(event) => setSshName(event.target.value)} placeholder="开发机" /></label><label>SSH 用户<input value={sshUsername} onChange={(event) => setSshUsername(event.target.value)} placeholder="raymond" /></label><label className="ssh-host-field">主机名或 IP<input value={sshHost} onChange={(event) => { setSshHost(event.target.value); setSshFingerprint(""); }} placeholder="192.168.1.20" /></label><label>端口<input inputMode="numeric" value={sshPort} onChange={(event) => { setSshPort(event.target.value); setSshFingerprint(""); }} /></label></div>
-          <div className="safety-note"><ShieldAlert size={18} /><span>私钥使用 AES-256-GCM 加密后保存且永不返回浏览器。生产环境必须使用 HTTPS，并单独配置 SSH_KEY_ENCRYPTION_KEY。</span></div>
           <div className="ssh-key-actions"><button onClick={() => void generateSshKey()} disabled={sshSetupBusy}>生成专用 Ed25519 密钥</button><span>或上传已有 OpenSSH 私钥</span></div>
-          {generatedSshKey ? <div className="pairing-code"><small>仅在目标主机执行以下幂等脚本，私钥不会离开控制面：</small><code>{authorizedKeyScript(generatedSshKey.publicKey)}</code><button onClick={() => void navigator.clipboard.writeText(authorizedKeyScript(generatedSshKey.publicKey))}><Copy size={14} /> 复制授权脚本</button></div> : <><label>OpenSSH 私钥<textarea className="ssh-private-key" value={sshPrivateKey} onChange={(event) => setSshPrivateKey(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" autoComplete="off" spellCheck={false} /></label><label>私钥口令（如有）<input type="password" value={sshPassphrase} onChange={(event) => setSshPassphrase(event.target.value)} autoComplete="new-password" /></label></>}
-          <div className="ssh-fingerprint"><button onClick={() => void probeSshHost()} disabled={!sshHost || !sshUsername || sshSetupBusy}>探测主机指纹</button>{sshFingerprint && <code>{sshFingerprint}</code>}</div>
-          {sshFingerprint && <p className="fine-print">请通过主机控制台或可信渠道核对该 SHA-256 指纹。保存后指纹变化会被拒绝，而不会静默接受。</p>}
+          {generatedSshKey ? <div className="pairing-code"><small>{sshConnectionMode === "reverse-ssh" ? "在宿主机执行：授权控制面并打印待粘贴的 SSH 指纹。" : "在目标主机执行，授权控制面登录。"}</small><code>{sshConnectionMode === "reverse-ssh" ? reverseHostPrepareScript(generatedSshKey.publicKey) : authorizedKeyScript(generatedSshKey.publicKey)}</code><button onClick={() => void navigator.clipboard.writeText(sshConnectionMode === "reverse-ssh" ? reverseHostPrepareScript(generatedSshKey.publicKey) : authorizedKeyScript(generatedSshKey.publicKey))}><Copy size={14} /> 复制宿主机准备命令</button></div> : <><label>OpenSSH 私钥<textarea className="ssh-private-key" value={sshPrivateKey} onChange={(event) => setSshPrivateKey(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" autoComplete="off" spellCheck={false} /></label><label>私钥口令（如有）<input type="password" value={sshPassphrase} onChange={(event) => setSshPassphrase(event.target.value)} autoComplete="new-password" /></label></>}
+          {sshConnectionMode === "direct" ? <div className="ssh-fingerprint"><button onClick={() => void probeSshHost()} disabled={!sshHost || !sshUsername || sshSetupBusy}>探测主机指纹</button>{sshFingerprint && <code>{sshFingerprint}</code>}</div> : <label>宿主机 SSH 指纹<input value={sshFingerprint} onChange={(event) => setSshFingerprint(event.target.value.trim())} placeholder="SHA256:…（由上方命令输出）" /></label>}
           {sshSetupError && <div className="modal-error"><ShieldAlert size={15} /><span>{sshSetupError}</span></div>}
-          <div className="ssh-form-actions"><button onClick={() => setShowSshForm(false)}>取消</button><button className="primary" disabled={sshSetupBusy || !sshFingerprint || !sshUsername || (!generatedSshKey && !sshPrivateKey)} onClick={() => void createSshHost()}>{sshSetupBusy ? "验证中…" : "验证并保存"}</button></div>
+          <div className="ssh-form-actions"><button onClick={() => setShowSshForm(false)}>取消</button><button className="primary" disabled={sshSetupBusy || !sshHost || !sshFingerprint || !sshUsername || (!generatedSshKey && !sshPrivateKey)} onClick={() => void createSshHost()}>{sshSetupBusy ? "处理中…" : sshConnectionMode === "direct" ? "验证并保存" : "保存并生成隧道命令"}</button></div>
         </div>}
       </section></div>}
 

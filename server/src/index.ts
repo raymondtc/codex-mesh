@@ -227,22 +227,10 @@ async function handleBrowserRpc(context: BrowserContext, method: string, params:
     return { ok: true, modelCount: Array.isArray((result as { data?: unknown[] })?.data) ? (result as { data: unknown[] }).data.length : null };
   }
   if (method === "bridge/ssh/tunnel/enable") {
-    if (!reverseRelay) throw new Error("Reverse SSH relay is not enabled on this server");
     if (typeof input.machineId !== "string" || !await machineBelongsToUser(input.machineId, context.userId)) throw new Error("Machine not found");
-    const keys = sshUtils.generateKeyPairSync("ed25519", { comment: `codex-mesh-tunnel-${input.machineId}` });
-    if (!await enableMachineTunnel(context.userId, input.machineId, keys.public)) throw new Error("SSH machine not found");
-    registry.unregister(input.machineId);
-    const knownHost = relayPort === 22 ? relayPublicHost : `[${relayPublicHost}]:${relayPort}`;
-    return {
-      machineId: input.machineId,
-      privateKey: keys.private,
-      publicKey: keys.public,
-      relayHost: relayPublicHost,
-      relayPort,
-      relayHostKeySha256: reverseRelay.hostKeySha256,
-      knownHostsLine: `${knownHost} ${reverseRelay.hostPublicKey}`,
-      command: `ssh -NT -i /etc/codex-mesh/tunnel_ed25519 -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/codex-mesh/relay_known_hosts -R 127.0.0.1:0:127.0.0.1:22 ${input.machineId}@${relayPublicHost} -p ${relayPort}`,
-    };
+    const machine = await getSshHost(context.userId, input.machineId);
+    if (!machine) throw new Error("SSH machine not found");
+    return createTunnelSetup(context.userId, input.machineId, machine.sshPort ?? 22);
   }
   if (method === "bridge/ssh/tunnel/disable") {
     if (typeof input.machineId !== "string") throw new Error("machineId is required");
@@ -378,14 +366,19 @@ function rejectUpgrade(socket: Duplex, status: number, statusText: string): void
   socket.destroy();
 }
 
-async function createSshMachine(context: BrowserContext, input: Record<string, unknown>): Promise<MachineRecord & { online: boolean }> {
+async function createSshMachine(context: BrowserContext, input: Record<string, unknown>): Promise<MachineRecord & { online: boolean; tunnelSetup?: Awaited<ReturnType<typeof createTunnelSetup>> }> {
   const host = requiredHost(input.host);
   const port = sshPort(input.port);
   const username = requiredSshUsername(input.username);
   const name = typeof input.name === "string" && input.name.trim() ? input.name.trim().slice(0, 120) : `${username}@${host}`;
   const hostKeySha256 = requiredFingerprint(input.hostKeySha256);
-  const probedFingerprint = await probeSshHost(host, port);
-  if (probedFingerprint !== hostKeySha256) throw new Error(`SSH host key changed: expected ${hostKeySha256}, received ${probedFingerprint}`);
+  const connectionMode = input.connectionMode === "reverse-ssh" ? "reverse-ssh" : "direct";
+  if (connectionMode === "direct") {
+    const probedFingerprint = await probeSshHost(host, port);
+    if (probedFingerprint !== hostKeySha256) throw new Error(`SSH host key changed: expected ${hostKeySha256}, received ${probedFingerprint}`);
+  } else if (!reverseRelay) {
+    throw new Error("Reverse SSH relay is not enabled on this server");
+  }
 
   let credential: SshCredential;
   let publicKey: string | undefined;
@@ -401,16 +394,37 @@ async function createSshMachine(context: BrowserContext, input: Record<string, u
     publicKey = publicKeyFromPrivate(credential);
   }
   const codexCommand = typeof input.codexCommand === "string" && input.codexCommand.trim() ? input.codexCommand.trim().slice(0, 512) : "codex app-server --stdio";
-  const transport = new SshMachineTransport({ host, port, username, hostKeySha256, codexCommand, ...credential });
-  try {
-    await transport.start();
-    await transport.request("model/list", undefined, 30_000);
-  } finally {
-    transport.close();
+  if (connectionMode === "direct") {
+    const transport = new SshMachineTransport({ host, port, username, hostKeySha256, codexCommand, ...credential });
+    try {
+      await transport.start();
+      await transport.request("model/list", undefined, 30_000);
+    } finally {
+      transport.close();
+    }
   }
   const machine = await createSshHost(context.userId, { name, host, port, username, hostKeySha256, codexCommand, publicKey, ...credential });
+  if (connectionMode === "reverse-ssh") return { ...machine, connectionMode, online: false, tunnelSetup: await createTunnelSetup(context.userId, machine.id, port) };
   context.machineId = machine.id;
   return { ...machine, online: false };
+}
+
+async function createTunnelSetup(userId: string, machineId: string, targetPort: number) {
+  if (!reverseRelay) throw new Error("Reverse SSH relay is not enabled on this server");
+  const keys = sshUtils.generateKeyPairSync("ed25519", { comment: `codex-mesh-tunnel-${machineId}` });
+  if (!await enableMachineTunnel(userId, machineId, keys.public)) throw new Error("SSH machine not found");
+  registry.unregister(machineId);
+  const knownHost = relayPort === 22 ? relayPublicHost : `[${relayPublicHost}]:${relayPort}`;
+  return {
+    machineId,
+    privateKey: keys.private,
+    publicKey: keys.public,
+    relayHost: relayPublicHost,
+    relayPort,
+    relayHostKeySha256: reverseRelay.hostKeySha256,
+    knownHostsLine: `${knownHost} ${reverseRelay.hostPublicKey}`,
+    command: `ssh -NT -i /etc/codex-mesh/tunnel_ed25519 -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/codex-mesh/relay_known_hosts -R 127.0.0.1:0:127.0.0.1:${targetPort} ${machineId}@${relayPublicHost} -p ${relayPort}`,
+  };
 }
 
 function requiredHost(value: unknown): string {

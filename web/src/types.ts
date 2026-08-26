@@ -54,7 +54,7 @@ export interface Machine {
   id: string;
   tenantId: string;
   name: string;
-  kind: "local" | "ssh";
+  kind: "local" | "ssh" | "agent" | string;
   online: boolean;
   codexVersion?: string | null;
   capabilities: string[];

@@ -251,6 +251,8 @@ select, input { color: var(--text); background: var(--panel-2); border: 1px soli
 .modal { width: min(100%, 460px); display: grid; gap: 10px; padding: 18px; border: 1px solid var(--border); border-radius: 16px; background: var(--panel); box-shadow: 0 30px 90px rgba(0,0,0,.5); }
 .modal header { display: flex; align-items: center; gap: 5px; margin-bottom: 7px; }
 .modal h2 { font-size: 17px; margin: 0; }
+.machine-modal { width: min(620px, 96vw); max-height: calc(100dvh - 28px); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.machine-modal header { position: sticky; top: -18px; z-index: 2; margin: -18px -18px 4px; padding: 18px 18px 10px; background: var(--panel); }
 .machine-modal header h2 { flex: 1; }
 .user-modal header h2 { flex: 1; }
 .machine-list { display: grid; gap: 6px; margin: 4px 0 10px; }
@@ -279,7 +281,12 @@ select, input { color: var(--text); background: var(--panel-2); border: 1px soli
 .pairing-code { padding: 11px; border: 1px solid rgba(216,255,133,.25); border-radius: 10px; background: rgba(216,255,133,.05); display: grid; gap: 8px; }
 .pairing-code small { color: var(--muted); }.pairing-code code { overflow-wrap: anywhere; color: var(--accent); font-size: 10px; line-height: 1.55; }
 .pairing-code button { width: fit-content; border: 0; background: transparent; color: var(--accent); display: flex; align-items: center; gap: 5px; cursor: pointer; }
+.tunnel-copy-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .ssh-host-form { display: grid; gap: 10px; padding-top: 4px; }
+.ssh-mode-select { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.ssh-mode-select button { min-height: 40px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel-2); color: var(--muted); cursor: pointer; }
+.ssh-mode-select button.selected { border-color: var(--accent); background: rgba(216,255,133,.08); color: var(--accent); }
+.mode-hint { color: var(--muted); font-size: 10px; line-height: 1.5; }
 .ssh-config-import { width: fit-content; min-height: 34px; padding: 0 10px; border: 1px dashed var(--border); border-radius: 8px; cursor: pointer; }
 .ssh-config-import input { display: none; }
 .ssh-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }

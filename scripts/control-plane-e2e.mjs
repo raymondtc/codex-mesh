@@ -61,6 +61,11 @@ try {
   assert(generated.publicKey.startsWith("ssh-ed25519 "), "SSH key generation failed");
   const probe = await browser.call("bridge/ssh/host/probe", { host: "127.0.0.1", port: sshPort });
   assert(probe.hostKeySha256.startsWith("SHA256:"), "SSH host-key probe failed");
+  const reverseGenerated = await browser.call("bridge/ssh/key/generate", {});
+  const reverseMachine = await browser.call("bridge/ssh/host/create", { name: "E2E Reverse Host", host: "127.0.0.1", port: sshPort, username: "mesh-e2e", hostKeySha256: probe.hostKeySha256, generatedKeyId: reverseGenerated.keyId, connectionMode: "reverse-ssh" });
+  assert(reverseMachine.connectionMode === "reverse-ssh" && reverseMachine.tunnelSetup?.relayHost === "127.0.0.1" && reverseMachine.tunnelSetup?.relayPort === relayPort, "reverse host creation did not use the configured public relay endpoint");
+  assert(reverseMachine.tunnelSetup.command.includes(`127.0.0.1:${sshPort}`), "reverse host creation did not forward the configured SSH port");
+  await browser.call("bridge/machine/revoke", { machineId: reverseMachine.id });
   await assertRejects(() => browser.call("bridge/ssh/host/create", { name: "Wrong fingerprint", host: "127.0.0.1", port: sshPort, username: "mesh-e2e", hostKeySha256: `SHA256:${"A".repeat(43)}`, generatedKeyId: generated.keyId }), "mismatched SSH host key was accepted");
   const sshMachine = await browser.call("bridge/ssh/host/create", { name: "E2E SSH Host", host: "127.0.0.1", port: sshPort, username: "mesh-e2e", hostKeySha256: probe.hostKeySha256, generatedKeyId: generated.keyId });
   assert(sshMachine.id && sshMachine.kind === "ssh", "SSH host creation failed");
@@ -157,7 +162,7 @@ try {
     ok: true,
     database: "pglite",
     auth: { firstUserAdmin: true, userIsolation: true, roleManagement: true, userLifecycleManagement: true },
-    ssh: { generatedKey: true, hostKeyPinned: true, hostKeyMismatchRejected: true, privateKeyNotReturned: true, appServerOverExec: true, reverseTunnel: true, relayEndpointNotExposed: true, userIsolation: true, revoke: true },
+    ssh: { generatedKey: true, hostKeyPinned: true, hostKeyMismatchRejected: true, privateKeyNotReturned: true, appServerOverExec: true, reverseHostCreate: true, reverseTunnel: true, relayEndpointNotExposed: true, userIsolation: true, revoke: true },
     conversation: { meshId: conversation.meshId, deepLink: true, relationshipMetadata: true },
   }, null, 2));
 } catch (error) {
