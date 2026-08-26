@@ -446,8 +446,9 @@ function requiredSshUsername(value: unknown): string {
 }
 
 function requiredFingerprint(value: unknown): string {
-  if (typeof value !== "string" || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(value)) throw new Error("Confirm the probed SSH host-key fingerprint first");
-  return value;
+  const fingerprint = typeof value === "string" ? value.match(/SHA256:[A-Za-z0-9+/]{43}/)?.[0] : undefined;
+  if (!fingerprint) throw new Error("Confirm the SSH host-key fingerprint first");
+  return fingerprint;
 }
 
 function publicKeyFromPrivate(credential: SshCredential): string {

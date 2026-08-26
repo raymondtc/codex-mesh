@@ -154,6 +154,10 @@ function reverseHostPrepareScript(publicKey: string): string {
   return `${authorizedKeyScript(publicKey)}\nprintf '\\n将下面的 SHA256 指纹粘贴回 Codex Mesh：\\n'\nssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256`;
 }
 
+function normalizeSshFingerprint(value: string): string {
+  return value.match(/SHA256:[A-Za-z0-9+/]{43}/)?.[0] ?? value.trim();
+}
+
 function tunnelInstallScript(setup: TunnelSetup): string {
   return `sudo sh -c 'umask 077; install -d -m 700 /etc/codex-mesh; cat > /etc/codex-mesh/tunnel_ed25519 <<"KEY"\n${setup.privateKey.trimEnd()}\nKEY\ncat > /etc/codex-mesh/relay_known_hosts <<"HOST"\n${setup.knownHostsLine}\nHOST\nchmod 600 /etc/codex-mesh/tunnel_ed25519 /etc/codex-mesh/relay_known_hosts'\nsudo ${setup.command}`;
 }
@@ -941,6 +945,10 @@ export default function App() {
   }
 
   async function createSshHost() {
+    if (!sshUsername.trim()) { setSshSetupError("请填写宿主机上的 SSH 用户名（灰色示例不是已填写内容）"); return; }
+    if (sshConnectionMode === "direct" && !sshHost.trim()) { setSshSetupError("请填写主机名或 IP"); return; }
+    if (!/^SHA256:[A-Za-z0-9+/]{43}$/.test(sshFingerprint)) { setSshSetupError("请粘贴宿主机命令输出的 SHA256 指纹"); return; }
+    if (!generatedSshKey && !sshPrivateKey) { setSshSetupError("请先生成专用密钥或上传私钥"); return; }
     setSshSetupBusy(true); setSshSetupError("");
     try {
       const machine = await bridge.call<Machine & { tunnelSetup?: TunnelSetup }>("bridge/ssh/host/create", {
@@ -1297,11 +1305,11 @@ export default function App() {
           <div className="ssh-mode-select"><button className={sshConnectionMode === "direct" ? "selected" : ""} onClick={() => { setSshConnectionMode("direct"); setSshFingerprint(""); setGeneratedSshKey(null); }}>直连 SSH</button><button className={sshConnectionMode === "reverse-ssh" ? "selected" : ""} onClick={() => { setSshConnectionMode("reverse-ssh"); setSshFingerprint(""); setGeneratedSshKey(null); setSshPrivateKey(""); setSshPassphrase(""); }}>反向隧道</button></div>
           <small className="mode-hint">{sshConnectionMode === "direct" ? "控制面能访问该主机时使用；保存前会实际连接验证。" : "宿主机主动连接公网 Relay；适合 NAT、内网或无入站端口的机器。"}</small>
           {sshConnectionMode === "direct" && <label className="ssh-config-import">从 OpenSSH config 导入主机参数<input type="file" accept=".ssh-config,.conf,text/plain" onChange={(event) => { const file = event.target.files?.[0]; if (file) void importSshConfig(file); }} /></label>}
-          <div className="ssh-form-grid"><label>名称<input value={sshName} onChange={(event) => setSshName(event.target.value)} placeholder="开发机" /></label><label>SSH 用户<input value={sshUsername} onChange={(event) => setSshUsername(event.target.value)} placeholder="raymond" /></label>{sshConnectionMode === "direct" && <label className="ssh-host-field">主机名或 IP<input value={sshHost} onChange={(event) => { setSshHost(event.target.value); setSshFingerprint(""); }} placeholder="192.168.1.20" /></label>}<label>SSH 端口<input inputMode="numeric" value={sshPort} onChange={(event) => { setSshPort(event.target.value); setSshFingerprint(""); }} /></label></div>
+          <div className="ssh-form-grid"><label>名称<input value={sshName} onChange={(event) => setSshName(event.target.value)} placeholder="开发机" /></label><label>SSH 用户（必填）<input value={sshUsername} onChange={(event) => setSshUsername(event.target.value)} placeholder="例如 raymond" /></label>{sshConnectionMode === "direct" && <label className="ssh-host-field">主机名或 IP<input value={sshHost} onChange={(event) => { setSshHost(event.target.value); setSshFingerprint(""); }} placeholder="192.168.1.20" /></label>}<label>SSH 端口<input inputMode="numeric" value={sshPort} onChange={(event) => { setSshPort(event.target.value); setSshFingerprint(""); }} /></label></div>
           {sshConnectionMode === "reverse-ssh" ? <>{!generatedSshKey ? <button className="primary reverse-setup-button" onClick={() => void generateAndCopyReverseSetup()} disabled={sshSetupBusy}><Copy size={16} /> {sshSetupBusy ? "生成中…" : "1. 生成并复制宿主机准备命令"}</button> : <div className="pairing-code"><small>准备命令已复制。到宿主机终端执行，再把输出的 SHA256 指纹粘贴到下方。</small><button onClick={() => void navigator.clipboard.writeText(reverseHostPrepareScript(generatedSshKey.publicKey))}><Copy size={14} /> 再次复制准备命令</button></div>}</> : <><div className="ssh-key-actions"><button onClick={() => void generateSshKey()} disabled={sshSetupBusy}>生成专用 Ed25519 密钥</button><span>或上传已有 OpenSSH 私钥</span></div>{generatedSshKey ? <div className="pairing-code"><small>在目标主机执行，授权控制面登录。</small><code>{authorizedKeyScript(generatedSshKey.publicKey)}</code><button onClick={() => void navigator.clipboard.writeText(authorizedKeyScript(generatedSshKey.publicKey))}><Copy size={14} /> 复制授权命令</button></div> : <><label>OpenSSH 私钥<textarea className="ssh-private-key" value={sshPrivateKey} onChange={(event) => setSshPrivateKey(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" autoComplete="off" spellCheck={false} /></label><label>私钥口令（如有）<input type="password" value={sshPassphrase} onChange={(event) => setSshPassphrase(event.target.value)} autoComplete="new-password" /></label></>}</>}
-          {sshConnectionMode === "direct" ? <div className="ssh-fingerprint"><button onClick={() => void probeSshHost()} disabled={!sshHost || !sshUsername || sshSetupBusy}>探测主机指纹</button>{sshFingerprint && <code>{sshFingerprint}</code>}</div> : <label>宿主机 SSH 指纹<input value={sshFingerprint} onChange={(event) => setSshFingerprint(event.target.value.trim())} placeholder="SHA256:…（由上方命令输出）" /></label>}
+          {sshConnectionMode === "direct" ? <div className="ssh-fingerprint"><button onClick={() => void probeSshHost()} disabled={!sshHost || sshSetupBusy}>探测主机指纹</button>{sshFingerprint && <code>{sshFingerprint}</code>}</div> : <label>宿主机 SSH 指纹<input value={sshFingerprint} onChange={(event) => setSshFingerprint(normalizeSshFingerprint(event.target.value))} placeholder="可粘贴 ssh-keygen 的整行输出" /></label>}
           {sshSetupError && <div className="modal-error"><ShieldAlert size={15} /><span>{sshSetupError}</span></div>}
-          <div className="ssh-form-actions"><button onClick={() => setShowSshForm(false)}>取消</button><button className="primary" disabled={sshSetupBusy || (sshConnectionMode === "direct" && !sshHost) || !sshFingerprint || !sshUsername || (!generatedSshKey && !sshPrivateKey)} onClick={() => void createSshHost()}>{sshSetupBusy ? "处理中…" : sshConnectionMode === "direct" ? "验证并保存" : "2. 保存并生成隧道命令"}</button></div>
+          <div className="ssh-form-actions"><button onClick={() => setShowSshForm(false)}>取消</button><button className="primary" disabled={sshSetupBusy} onClick={() => void createSshHost()}>{sshSetupBusy ? "处理中…" : sshConnectionMode === "direct" ? "验证并保存" : "2. 保存并生成隧道命令"}</button></div>
         </div>}
       </section></div>}
 
