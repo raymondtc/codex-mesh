@@ -52,10 +52,13 @@ Generate deployment secrets once:
 openssl rand -base64 32   # BETTER_AUTH_SECRET
 openssl rand -base64 32   # SSH_KEY_ENCRYPTION_KEY
 ssh-keygen -t ed25519 -N '' -f ./relay_host_ed25519
+sudo chown 1000:1000 ./relay_host_ed25519 # runtime image's non-root node user
 chmod 600 ./relay_host_ed25519
 ```
 
 Set `BETTER_AUTH_URL` and `TRUSTED_ORIGINS` to the public HTTPS origin. When enabling the relay, set `RELAY_ENABLED=1`, `RELAY_PUBLIC_HOST`, and `RELAY_HOST_KEY_FILE` to the persistent private host-key path.
+
+The Relay key bind mount must be readable by UID/GID `1000:1000`, used by the image's non-root `node` account. Keep it mode `0600`; do not make the private key world-readable.
 
 ## Stable release
 
