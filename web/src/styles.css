@@ -338,6 +338,9 @@ select, input { color: var(--text); background: var(--panel-2); border: 1px soli
 .preview-meta { display: flex; align-items: center; gap: 8px; }
 .preview-meta span { padding: 3px 6px; border: 1px solid #39433b; border-radius: 5px; background: var(--panel-2); color: #b8c3ba; font: 9px 'DM Mono', monospace; text-transform: uppercase; }
 .preview-content > header small { color: var(--muted); font-size: 9px; }
+.preview-download { flex: 0 0 auto; min-width: 72px; min-height: 32px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-3); color: var(--text); display: inline-flex; align-items: center; justify-content: center; gap: 6px; cursor: pointer; }
+.preview-download b { color: inherit; font-size: 11px; font-weight: 600; }
+.preview-download:hover { border-color: var(--accent); color: var(--accent); }
 .source-code { min-width: 100%; width: fit-content; margin: 0; padding: 12px 0 22px; overflow: visible; white-space: pre; font-size: 11px; line-height: 1.62; tab-size: 2; }
 .source-line { display: table-row; min-height: 18px; }
 .source-line:hover { background: rgba(255,255,255,.025); }
