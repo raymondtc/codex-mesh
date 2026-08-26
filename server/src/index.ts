@@ -55,6 +55,7 @@ const pendingServerRequests = new Map<string, { machineId: string; requestId: st
 const browserSessionBySocket = new WeakMap<WebSocket, AuthSession>();
 const aliveSockets = new WeakSet<WebSocket>();
 const pendingSshKeys = new Map<string, PendingSshKey>();
+const machineStartPromises = new Map<string, Promise<MachineTransport>>();
 const reverseRelay = relayEnabled ? new ReverseSshRelay({ host: relayHost, port: relayPort, publicHost: relayPublicHost, hostKeyPath: process.env.RELAY_HOST_KEY_PATH }) : undefined;
 
 appServer.on("stderr", (value) => process.stderr.write(`[app-server] ${value}`));
@@ -306,6 +307,15 @@ function registerMachine(machine: MachineRecord, transport: MachineTransport): v
 async function requireMachine(userId: string, machineId: string): Promise<MachineTransport> {
   const existing = registry.get(machineId);
   if (existing) return existing;
+  const pending = machineStartPromises.get(machineId);
+  if (pending) return pending;
+  const starting = startMachine(userId, machineId);
+  machineStartPromises.set(machineId, starting);
+  try { return await starting; }
+  finally { if (machineStartPromises.get(machineId) === starting) machineStartPromises.delete(machineId); }
+}
+
+async function startMachine(userId: string, machineId: string): Promise<MachineTransport> {
   const host = await getSshHost(userId, machineId);
   if (!host?.sshHost || !host.sshPort || !host.sshUsername || !host.sshHostKeySha256) throw new Error("SSH host not found");
   const transport = new SshMachineTransport({
@@ -322,6 +332,7 @@ async function requireMachine(userId: string, machineId: string): Promise<Machin
     } : {}),
     ...host.credential,
   });
+  transport.on("stderr", (value: string) => process.stderr.write(`[ssh:${machineId}] ${value}`));
   await transport.start();
   registerMachine(host, transport);
   await updateMachinePresence(machineId);

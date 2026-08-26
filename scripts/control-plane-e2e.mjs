@@ -93,8 +93,13 @@ try {
   children.push(tunnel);
   let tunnelOutput = "";
   tunnel.stderr.on("data", (chunk) => { tunnelOutput += String(chunk); });
-  const reverseSelected = await retry(async () => browser.call("bridge/machine/select", { machineId: sshMachine.id }), 10_000, () => tunnelOutput);
+  const [reverseSelected, concurrentThreads, concurrentModels] = await retry(async () => Promise.all([
+    browser.call("bridge/machine/select", { machineId: sshMachine.id }),
+    browser.call("thread/list", {}),
+    browser.call("model/list", {}),
+  ]), 10_000, () => tunnelOutput);
   assert(reverseSelected.online === true, "machine did not connect through the reverse SSH tunnel");
+  assert(concurrentThreads.data[0]?.id === "remote-thread-e2e" && concurrentModels.data.length === 1, "concurrent startup requests did not share one SSH transport");
   const reverseThreads = await browser.call("thread/list", {});
   assert(reverseThreads.data[0]?.id === "remote-thread-e2e", "Codex RPC did not traverse the reverse SSH tunnel");
 

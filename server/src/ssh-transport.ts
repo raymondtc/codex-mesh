@@ -35,6 +35,7 @@ export class SshMachineTransport extends EventEmitter implements MachineTranspor
   private starting?: Promise<void>;
   private nextId = 1;
   private pending = new Map<number | string, PendingRequest>();
+  private remoteStderr = "";
 
   constructor(private readonly config: SshHostConfig) { super(); }
 
@@ -87,6 +88,7 @@ export class SshMachineTransport extends EventEmitter implements MachineTranspor
   }
 
   private async connect(): Promise<void> {
+    this.remoteStderr = "";
     const client = new Client();
     this.client = client;
     const socket = this.config.createSocket ? await this.config.createSocket() : undefined;
@@ -111,9 +113,14 @@ export class SshMachineTransport extends EventEmitter implements MachineTranspor
     });
     this.channel = channel;
     createInterface({ input: channel }).on("line", (line) => this.handleLine(line));
-    channel.stderr.on("data", (chunk) => this.emit("stderr", String(chunk)));
+    channel.stderr.on("data", (chunk) => {
+      const value = String(chunk);
+      this.remoteStderr = `${this.remoteStderr}${value}`.slice(-8_192);
+      this.emit("stderr", value);
+    });
     channel.once("close", (code: number | null, signal: string | null) => {
-      const error = new Error(`Remote Codex app-server exited (code=${code ?? "none"}, signal=${signal ?? "none"})`);
+      const details = this.remoteStderr.trim();
+      const error = new Error(`Remote Codex app-server exited (code=${code ?? "none"}, signal=${signal ?? "none"})${details ? `: ${details}` : ""}`);
       this.channel = undefined;
       this.failAll(error);
       this.emit("exit", error);
