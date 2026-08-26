@@ -1,4 +1,4 @@
-import { boolean, index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 export const user = pgTable("user", {
   id: text("id").primaryKey(),
@@ -58,8 +58,27 @@ export const verification = pgTable("verification", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [index("verification_identifier_idx").on(table.identifier)]);
 
+export const tenants = pgTable("tenants", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: text("name").notNull(),
+  slug: text("slug").notNull().unique(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const tenantMembers = pgTable("tenant_members", {
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  role: text("role").default("owner").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("tenant_members_tenant_user_idx").on(table.tenantId, table.userId),
+  index("tenant_members_user_idx").on(table.userId),
+]);
+
 export const machines = pgTable("machines", {
   id: uuid("id").defaultRandom().primaryKey(),
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
   ownerUserId: text("owner_user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
   credentialHash: text("credential_hash"),
@@ -67,6 +86,15 @@ export const machines = pgTable("machines", {
   codexVersion: text("codex_version"),
   capabilities: jsonb("capabilities").$type<string[]>().default([]).notNull(),
   kind: text("kind").default("agent").notNull(),
+  sshHost: text("ssh_host"),
+  sshPort: integer("ssh_port"),
+  sshUsername: text("ssh_username"),
+  sshPrivateKeyEncrypted: text("ssh_private_key_encrypted"),
+  sshPublicKey: text("ssh_public_key"),
+  sshHostKeySha256: text("ssh_host_key_sha256"),
+  sshCodexCommand: text("ssh_codex_command"),
+  connectionMode: text("connection_mode").default("direct").notNull(),
+  tunnelPublicKey: text("tunnel_public_key"),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
   revokedAt: timestamp("revoked_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -84,6 +112,7 @@ export const machineEnrollments = pgTable("machine_enrollments", {
 
 export const conversations = pgTable("conversations", {
   id: uuid("id").defaultRandom().primaryKey(),
+  tenantId: uuid("tenant_id").notNull().references(() => tenants.id, { onDelete: "cascade" }),
   ownerUserId: text("owner_user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
   machineId: uuid("machine_id").notNull().references(() => machines.id, { onDelete: "cascade" }),
   remoteThreadId: text("remote_thread_id").notNull(),
@@ -111,6 +140,7 @@ export const machineGrants = pgTable("machine_grants", {
 
 export const auditEvents = pgTable("audit_events", {
   id: uuid("id").defaultRandom().primaryKey(),
+  tenantId: uuid("tenant_id").references(() => tenants.id, { onDelete: "set null" }),
   userId: text("user_id").references(() => user.id, { onDelete: "set null" }),
   machineId: uuid("machine_id").references(() => machines.id, { onDelete: "set null" }),
   conversationId: uuid("conversation_id").references(() => conversations.id, { onDelete: "set null" }),
@@ -119,4 +149,4 @@ export const auditEvents = pgTable("audit_events", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [index("audit_events_user_created_idx").on(table.userId, table.createdAt)]);
 
-export const schema = { user, session, account, verification, machines, machineEnrollments, conversations, machineGrants, auditEvents };
+export const schema = { user, session, account, verification, tenants, tenantMembers, machines, machineEnrollments, conversations, machineGrants, auditEvents };

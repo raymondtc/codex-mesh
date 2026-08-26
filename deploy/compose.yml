@@ -2,9 +2,8 @@ name: codex-mesh
 
 services:
   server:
-    build:
-      context: ..
-    image: codex-mesh-server:0.3.0
+    image: ${CODEX_MESH_IMAGE:-ghcr.io/raymondtc/codex-mesh:dev}
+    pull_policy: always
     restart: unless-stopped
     init: true
     environment:
@@ -13,13 +12,21 @@ services:
       CODEX_LOCAL_MACHINE: "off"
       CODEX_MESH_DATA_DIR: /data
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET is required}
+      SSH_KEY_ENCRYPTION_KEY: ${SSH_KEY_ENCRYPTION_KEY:?SSH_KEY_ENCRYPTION_KEY is required}
       BETTER_AUTH_URL: ${BETTER_AUTH_URL:?BETTER_AUTH_URL is required}
       TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:?TRUSTED_ORIGINS is required}
       DATABASE_URL: ${DATABASE_URL:-}
+      RELAY_ENABLED: ${RELAY_ENABLED:-0}
+      RELAY_HOST: 0.0.0.0
+      RELAY_PORT: 2222
+      RELAY_PUBLIC_HOST: ${RELAY_PUBLIC_HOST:-}
+      RELAY_HOST_KEY_PATH: /run/secrets/relay_host_key
     ports:
       - "127.0.0.1:${CODEX_MESH_PORT:-18787}:8787"
+      - "${CODEX_MESH_RELAY_BIND:-0.0.0.0}:${CODEX_MESH_RELAY_PORT:-2222}:2222"
     volumes:
       - codex-mesh-data:/data
+      - ${RELAY_HOST_KEY_FILE:-/dev/null}:/run/secrets/relay_host_key:ro
     read_only: true
     tmpfs:
       - /tmp:size=128m,mode=1777

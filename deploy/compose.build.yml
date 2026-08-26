@@ -1,0 +1,9 @@
+name: codex-mesh
+
+services:
+  server:
+    pull_policy: never
+    build:
+      context: ..
+    image: codex-mesh:local
+

@@ -14,6 +14,7 @@ import {
   FolderGit2,
   FolderOpen,
   FileText,
+  Download,
   GitFork,
   GitBranch,
   Image,
@@ -25,6 +26,7 @@ import {
   Pencil,
   MessageSquarePlus,
   PanelRightOpen,
+  Paperclip,
   Plus,
   RefreshCw,
   Search,
@@ -87,6 +89,15 @@ interface FilePreview {
   mimeType?: string;
 }
 
+interface UploadedAttachment {
+  name: string;
+  path: string;
+  absolutePath: string;
+  mimeType: string;
+  size: number;
+  image: boolean;
+}
+
 const COLLAPSED_GROUPS_KEY = "codex-remote-collapsed-groups";
 const CHAT_WORKSPACE_SEGMENTS = new Set(["codex-mesh-chat-workspaces", "codex-remote-chat-workspaces"]);
 
@@ -124,6 +135,11 @@ interface ZoomedImage {
   alt: string;
 }
 
+function authorizedKeyScript(publicKey: string): string {
+  const quoted = `'${publicKey.replaceAll("'", `'"'"'`)}'`;
+  return `umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; grep -qxF ${quoted} ~/.ssh/authorized_keys || printf '%s\\n' ${quoted} >> ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys`;
+}
+
 export default function App() {
   const authSession = authClient.useSession();
   const bridge = useMemo(() => new BridgeClient(), []);
@@ -142,7 +158,18 @@ export default function App() {
   const [userActionId, setUserActionId] = useState("");
   const [userError, setUserError] = useState("");
   const [currentRole, setCurrentRole] = useState("");
-  const [enrollment, setEnrollment] = useState<{ code: string; expiresAt: string } | null>(null);
+  const [showSshForm, setShowSshForm] = useState(false);
+  const [sshName, setSshName] = useState("");
+  const [sshHost, setSshHost] = useState("");
+  const [sshPort, setSshPort] = useState("22");
+  const [sshUsername, setSshUsername] = useState("");
+  const [sshPrivateKey, setSshPrivateKey] = useState("");
+  const [sshPassphrase, setSshPassphrase] = useState("");
+  const [sshFingerprint, setSshFingerprint] = useState("");
+  const [generatedSshKey, setGeneratedSshKey] = useState<{ keyId: string; publicKey: string } | null>(null);
+  const [sshSetupError, setSshSetupError] = useState("");
+  const [sshSetupBusy, setSshSetupBusy] = useState(false);
+  const [tunnelSetup, setTunnelSetup] = useState<{ machineId: string; privateKey: string; knownHostsLine: string; command: string; relayHostKeySha256: string } | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [selected, setSelected] = useState<Thread | null>(null);
@@ -155,6 +182,8 @@ export default function App() {
   const [effort, setEffort] = useState<ReasoningEffort>("high");
   const [permission, setPermission] = useState<PermissionMode>("workspace-write");
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<UploadedAttachment[]>([]);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [slashCommandIndex, setSlashCommandIndex] = useState(0);
   const [liveText, setLiveText] = useState("");
   const [sideLiveText, setSideLiveText] = useState("");
@@ -632,7 +661,7 @@ export default function App() {
 
   async function sendTurn(overrideMessage?: string) {
     const message = (overrideMessage ?? draft).trim();
-    if (!selected || !message || selectedSending) return;
+    if (!selected || (!message && !attachments.length) || selectedSending) return;
     if (message === "/fork") {
       setDraft("");
       await forkThread(selected);
@@ -655,16 +684,20 @@ export default function App() {
       return;
     }
     const optimisticId = clientId();
+    const turnAttachments = [...attachments];
+    const attachmentNote = turnAttachments.length ? `\n\nUploaded files:\n${turnAttachments.map((item) => `- ${item.absolutePath}`).join("\n")}` : "";
+    const effectiveMessage = `${message || "Please inspect the attached files."}${attachmentNote}`;
     setDraft("");
+    setAttachments([]);
     setBusy(true);
     setLiveText("");
     setError("");
-    setOptimisticMessages((current) => [...current, { id: optimisticId, threadId: selected.id, text: message, state: "sending" }]);
+    setOptimisticMessages((current) => [...current, { id: optimisticId, threadId: selected.id, text: message || turnAttachments.map((item) => `附件：${item.name}`).join("、"), state: "sending" }]);
     setActivityLabels((current) => ({ ...current, [selected.id]: "正在发送消息" }));
     try {
       const result = await bridge.call<{ turn: Turn }>("turn/start", {
         threadId: selected.id,
-        input: [{ type: "text", text: message, text_elements: [] }],
+        input: [{ type: "text", text: effectiveMessage, text_elements: [] }, ...turnAttachments.filter((item) => item.image).map((item) => ({ type: "localImage", path: item.absolutePath }))],
         ...(model ? { model } : {}),
         effort,
         ...turnPermissionParams(permission),
@@ -682,6 +715,7 @@ export default function App() {
         return next;
       });
       setError(messageText);
+      setAttachments(turnAttachments);
     } finally {
       setBusy(false);
     }
@@ -769,6 +803,35 @@ export default function App() {
     }
   }
 
+  async function uploadFiles(files: FileList | File[]) {
+    if (!selected) return;
+    setFileBusy(true);
+    setError("");
+    try {
+      const uploaded: UploadedAttachment[] = [];
+      for (const file of Array.from(files)) {
+        if (!file.size || file.size > 8 * 1024 * 1024) throw new Error(`${file.name} 必须在 1 byte 到 8 MB 之间`);
+        const safeName = file.name.replace(/[^A-Za-z0-9._-]/g, "-").slice(-120) || "upload.bin";
+        const path = `.codex-mesh-uploads/${Date.now().toString(36)}-${clientId().slice(0, 8)}-${safeName}`;
+        const result = await bridge.call<{ path: string; absolutePath: string; size: number }>("bridge/fs/writeFile", { threadId: selected.id, path, dataBase64: await fileBase64(file) });
+        uploaded.push({ name: file.name, path: result.path, absolutePath: result.absolutePath, size: result.size, mimeType: file.type || "application/octet-stream", image: file.type.startsWith("image/") || isImagePath(file.name) });
+      }
+      setAttachments((current) => [...current, ...uploaded]);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setFileBusy(false); if (uploadInputRef.current) uploadInputRef.current.value = ""; }
+  }
+
+  async function downloadFile(threadId: string, path: string) {
+    try {
+      const result = await bridge.call<{ dataBase64: string; mimeType: string }>("bridge/fs/downloadFile", { threadId, path });
+      const bytes = Uint8Array.from(atob(result.dataBase64), (character) => character.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: result.mimeType }));
+      const anchor = document.createElement("a");
+      anchor.href = url; anchor.download = path.split("/").pop() || "download"; anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  }
+
   async function interruptTurn() {
     if (!selected) return;
     const activeTurn = [...(selected.turns ?? [])].reverse().find((turn) => turn.status === "inProgress");
@@ -797,14 +860,85 @@ export default function App() {
     } finally { setBusy(false); }
   }
 
-  async function createEnrollment() {
-    const result = await bridge.call<{ code: string; expiresAt: string }>("bridge/machine/enrollment/create");
-    setEnrollment(result);
+  async function generateSshKey() {
+    setSshSetupBusy(true); setSshSetupError("");
+    try { setGeneratedSshKey(await bridge.call<{ keyId: string; publicKey: string }>("bridge/ssh/key/generate")); setSshPrivateKey(""); }
+    catch (reason) { setSshSetupError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setSshSetupBusy(false); }
+  }
+
+  async function importSshConfig(file: File) {
+    setSshSetupError("");
+    try {
+      const text = await file.text();
+      const lines = text.split(/\r?\n/);
+      let alias = "";
+      const values: Record<string, string> = {};
+      for (const raw of lines) {
+        const line = raw.replace(/\s+#.*$/, "").trim();
+        if (!line) continue;
+        const [key, ...rest] = line.split(/\s+/);
+        const value = rest.join(" ");
+        if (key.toLowerCase() === "host") {
+          if (alias && Object.keys(values).length) break;
+          if (!value.includes("*") && !value.includes("!")) alias = value.split(/\s+/)[0];
+          continue;
+        }
+        if (!alias) continue;
+        values[key.toLowerCase()] ??= value;
+      }
+      if (!alias) throw new Error("SSH config 中没有可导入的具体 Host 条目");
+      setSshName(alias);
+      setSshHost(values.hostname || alias);
+      if (values.user) setSshUsername(values.user);
+      if (values.port) setSshPort(values.port);
+      setSshFingerprint("");
+      if (values.identityfile) setSshSetupError(`已导入主机参数。出于浏览器安全限制，请另行上传 ${values.identityfile} 对应的私钥，或生成专用密钥。`);
+    } catch (reason) { setSshSetupError(reason instanceof Error ? reason.message : String(reason)); }
+  }
+
+  async function probeSshHost() {
+    setSshSetupBusy(true); setSshSetupError("");
+    try {
+      const result = await bridge.call<{ hostKeySha256: string }>("bridge/ssh/host/probe", { host: sshHost, port: Number(sshPort) });
+      setSshFingerprint(result.hostKeySha256);
+    } catch (reason) { setSshSetupError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setSshSetupBusy(false); }
+  }
+
+  async function createSshHost() {
+    setSshSetupBusy(true); setSshSetupError("");
+    try {
+      const machine = await bridge.call<Machine>("bridge/ssh/host/create", {
+        name: sshName, host: sshHost, port: Number(sshPort), username: sshUsername,
+        hostKeySha256: sshFingerprint,
+        ...(generatedSshKey ? { generatedKeyId: generatedSshKey.keyId } : { privateKey: sshPrivateKey, passphrase: sshPassphrase }),
+      });
+      await loadMachines();
+      setShowSshForm(false); setGeneratedSshKey(null); setSshPrivateKey(""); setSshPassphrase(""); setSshFingerprint("");
+      await selectMachine(machine.id);
+    } catch (reason) { setSshSetupError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setSshSetupBusy(false); }
   }
 
   async function removeMachine(machineId: string) {
-    if (!window.confirm("撤销这台机器？Agent 将立即断开。")) return;
+    if (!window.confirm("删除这台 SSH 主机？加密保存的私钥也会一并清除。")) return;
     await bridge.call("bridge/machine/revoke", { machineId });
+    await loadMachines();
+  }
+
+  async function enableTunnel(machineId: string) {
+    setSshSetupError("");
+    try {
+      const setup = await bridge.call<{ machineId: string; privateKey: string; knownHostsLine: string; command: string; relayHostKeySha256: string }>("bridge/ssh/tunnel/enable", { machineId });
+      setTunnelSetup(setup);
+      await loadMachines();
+    } catch (error) { setSshSetupError(error instanceof Error ? error.message : String(error)); }
+  }
+
+  async function disableTunnel(machineId: string) {
+    await bridge.call("bridge/ssh/tunnel/disable", { machineId });
+    setTunnelSetup(null);
     await loadMachines();
   }
 
@@ -1039,7 +1173,8 @@ export default function App() {
               {requests.filter((request) => requestThreadId(request) !== sideThread?.id).map((request) => <ApprovalCard key={String(request.id)} request={request} resolve={(result) => resolveRequest(request, result)} />)}
               <div className="composer">
                 {draft.startsWith("/") && <CommandMenu selectedIndex={slashCommandIndex} choose={(command) => void sendTurn(command)} />}
-                <textarea value={draft} onChange={(event) => { const next = event.target.value; if (next.startsWith("/") && !draft.startsWith("/")) setSlashCommandIndex(0); setDraft(next); }} onKeyDown={(event) => {
+                {attachments.length > 0 && <div className="attachment-list">{attachments.map((attachment) => <span key={attachment.path}>{attachment.image ? <Image size={13} /> : <FileText size={13} />}{attachment.name}<button onClick={() => setAttachments((current) => current.filter((item) => item.path !== attachment.path))} aria-label={`移除 ${attachment.name}`}><X size={12} /></button></span>)}</div>}
+                <textarea value={draft} onPaste={(event) => { const files = [...event.clipboardData.files]; if (files.length) { event.preventDefault(); void uploadFiles(files); } }} onChange={(event) => { const next = event.target.value; if (next.startsWith("/") && !draft.startsWith("/")) setSlashCommandIndex(0); setDraft(next); }} onKeyDown={(event) => {
                   if (draft.startsWith("/") && !event.nativeEvent.isComposing) {
                     if (event.key === "ArrowDown") { event.preventDefault(); setSlashCommandIndex((current) => (current + 1) % SLASH_COMMANDS.length); return; }
                     if (event.key === "ArrowUp") { event.preventDefault(); setSlashCommandIndex((current) => (current - 1 + SLASH_COMMANDS.length) % SLASH_COMMANDS.length); return; }
@@ -1050,6 +1185,8 @@ export default function App() {
                 }} placeholder="给 Codex 发送后续指令…" rows={2} />
                 <div className="composer-actions">
                   <div className="runtime-controls">
+                    <input ref={uploadInputRef} hidden type="file" multiple onChange={(event) => { if (event.target.files) void uploadFiles(event.target.files); }} />
+                    <button className="attach-button" type="button" disabled={fileBusy || running} onClick={() => uploadInputRef.current?.click()} title="上传文件或图片"><Paperclip size={16} /></button>
                     <select value={permission} onChange={(event) => setPermission(event.target.value as PermissionMode)} aria-label="权限" className={`permission-select permission-${permission}`}>
                       <option value="read-only">只读</option>
                       <option value="workspace-write">工作区</option>
@@ -1062,7 +1199,7 @@ export default function App() {
                       {REASONING_EFFORTS.map((value) => <option value={value} key={value}>{value}</option>)}
                     </select>
                   </div>
-                  {running ? <button className="stop-button" onClick={() => void interruptTurn()}><CircleStop size={17} /> 停止</button> : <button className="send-button" disabled={!draft.trim() || selectedSending} onClick={() => void sendTurn()} aria-label="发送"><Send size={18} /></button>}
+                  {running ? <button className="stop-button" onClick={() => void interruptTurn()}><CircleStop size={17} /> 停止</button> : <button className="send-button" disabled={(!draft.trim() && !attachments.length) || selectedSending || fileBusy} onClick={() => void sendTurn()} aria-label="发送"><Send size={18} /></button>}
                 </div>
               </div>
             </section>
@@ -1111,7 +1248,23 @@ export default function App() {
         </div>
       )}
 
-      {showMachines && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="Codex 机器"><section className="modal machine-modal"><header><MonitorCog size={20} /><h2>Codex 机器</h2><button className="icon-button" onClick={() => setShowMachines(false)}><X size={18} /></button></header><p className="muted">已登录为 {authSession.data.user.email}</p><div className="machine-list">{machines.map((machine) => <article key={machine.id}><i className={`online-dot ${machine.online ? "" : "offline"}`} /><span><strong>{machine.name}</strong><small>{machine.kind === "local" ? "控制面本机" : `${machine.agentVersion ?? "Agent"} · ${machine.online ? "在线" : "离线"}`}</small></span>{machine.kind === "agent" && <button onClick={() => void removeMachine(machine.id)}><Trash2 size={14} /></button>}</article>)}</div>{enrollment ? <div className="pairing-code"><small>在目标机器运行（10 分钟内有效）</small><code>npx codex-mesh pair --server {window.location.origin} --code {enrollment.code}</code><button onClick={() => void navigator.clipboard.writeText(`npx codex-mesh pair --server ${window.location.origin} --code ${enrollment.code}`)}><Copy size={14} /> 复制</button></div> : <button className="primary" onClick={() => void createEnrollment()}><Plus size={16} /> 添加机器</button>}</section></div>}
+      {showMachines && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="SSH 主机"><section className="modal machine-modal">
+        <header><MonitorCog size={20} /><h2>SSH 主机</h2><button className="icon-button" onClick={() => { setTunnelSetup(null); setShowMachines(false); }}><X size={18} /></button></header>
+        <p className="muted">控制面按需通过 SSH 启动远端 Codex，不需要宿主机常驻 Agent。</p>
+        <div className="machine-list">{machines.map((machine) => <article key={machine.id}><i className={`online-dot ${machine.online ? "" : "offline"}`} /><span><strong>{machine.name}</strong><small>{machine.kind === "local" ? "控制面本机" : `${machine.sshUsername}@${machine.sshHost}:${machine.sshPort ?? 22} · ${machine.connectionMode === "reverse-ssh" ? "反向隧道" : "直连"} · ${machine.online ? "已连接" : "按需连接"}`}</small></span>{machine.kind === "ssh" && <><button onClick={() => void (machine.connectionMode === "reverse-ssh" ? disableTunnel(machine.id) : enableTunnel(machine.id))}>{machine.connectionMode === "reverse-ssh" ? "停用隧道" : "启用隧道"}</button><button onClick={() => void removeMachine(machine.id)} aria-label="删除 SSH 主机"><Trash2 size={14} /></button></>}</article>)}</div>
+        {tunnelSetup && <div className="pairing-code"><small>以下内容只显示到关闭本窗口。请在宿主机保存私钥和 known_hosts，再由 systemd/launchd 保活命令。Relay 指纹：{tunnelSetup.relayHostKeySha256}</small><code>{`# /etc/codex-mesh/tunnel_ed25519\n${tunnelSetup.privateKey}\n# /etc/codex-mesh/relay_known_hosts\n${tunnelSetup.knownHostsLine}\n# tunnel command\n${tunnelSetup.command}`}</code><button onClick={() => void navigator.clipboard.writeText(`umask 077\nsudo install -d -m 700 /etc/codex-mesh\nsudo tee /etc/codex-mesh/tunnel_ed25519 >/dev/null <<'KEY'\n${tunnelSetup.privateKey}KEY\nsudo chmod 600 /etc/codex-mesh/tunnel_ed25519\nsudo tee /etc/codex-mesh/relay_known_hosts >/dev/null <<'HOST'\n${tunnelSetup.knownHostsLine}\nHOST\n${tunnelSetup.command}`)}><Copy size={14} /> 复制安装内容</button></div>}
+        {!showSshForm ? <button className="primary" onClick={() => setShowSshForm(true)}><Plus size={16} /> 添加 SSH 主机</button> : <div className="ssh-host-form">
+          <label className="ssh-config-import">从 OpenSSH config 导入主机参数<input type="file" accept=".ssh-config,.conf,text/plain" onChange={(event) => { const file = event.target.files?.[0]; if (file) void importSshConfig(file); }} /></label>
+          <div className="ssh-form-grid"><label>名称<input value={sshName} onChange={(event) => setSshName(event.target.value)} placeholder="开发机" /></label><label>SSH 用户<input value={sshUsername} onChange={(event) => setSshUsername(event.target.value)} placeholder="raymond" /></label><label className="ssh-host-field">主机名或 IP<input value={sshHost} onChange={(event) => { setSshHost(event.target.value); setSshFingerprint(""); }} placeholder="192.168.1.20" /></label><label>端口<input inputMode="numeric" value={sshPort} onChange={(event) => { setSshPort(event.target.value); setSshFingerprint(""); }} /></label></div>
+          <div className="safety-note"><ShieldAlert size={18} /><span>私钥使用 AES-256-GCM 加密后保存且永不返回浏览器。生产环境必须使用 HTTPS，并单独配置 SSH_KEY_ENCRYPTION_KEY。</span></div>
+          <div className="ssh-key-actions"><button onClick={() => void generateSshKey()} disabled={sshSetupBusy}>生成专用 Ed25519 密钥</button><span>或上传已有 OpenSSH 私钥</span></div>
+          {generatedSshKey ? <div className="pairing-code"><small>仅在目标主机执行以下幂等脚本，私钥不会离开控制面：</small><code>{authorizedKeyScript(generatedSshKey.publicKey)}</code><button onClick={() => void navigator.clipboard.writeText(authorizedKeyScript(generatedSshKey.publicKey))}><Copy size={14} /> 复制授权脚本</button></div> : <><label>OpenSSH 私钥<textarea className="ssh-private-key" value={sshPrivateKey} onChange={(event) => setSshPrivateKey(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" autoComplete="off" spellCheck={false} /></label><label>私钥口令（如有）<input type="password" value={sshPassphrase} onChange={(event) => setSshPassphrase(event.target.value)} autoComplete="new-password" /></label></>}
+          <div className="ssh-fingerprint"><button onClick={() => void probeSshHost()} disabled={!sshHost || !sshUsername || sshSetupBusy}>探测主机指纹</button>{sshFingerprint && <code>{sshFingerprint}</code>}</div>
+          {sshFingerprint && <p className="fine-print">请通过主机控制台或可信渠道核对该 SHA-256 指纹。保存后指纹变化会被拒绝，而不会静默接受。</p>}
+          {sshSetupError && <div className="modal-error"><ShieldAlert size={15} /><span>{sshSetupError}</span></div>}
+          <div className="ssh-form-actions"><button onClick={() => setShowSshForm(false)}>取消</button><button className="primary" disabled={sshSetupBusy || !sshFingerprint || !sshUsername || (!generatedSshKey && !sshPrivateKey)} onClick={() => void createSshHost()}>{sshSetupBusy ? "验证中…" : "验证并保存"}</button></div>
+        </div>}
+      </section></div>}
 
       {showSettings && <div className="modal-layer" role="dialog" aria-modal="true" aria-label="默认设置"><section className="modal settings-modal">
         <header><Settings2 size={20} /><h2>聊天默认设置</h2><button className="icon-button" onClick={() => setShowSettings(false)}><X size={18} /></button></header>
@@ -1161,7 +1314,7 @@ export default function App() {
             {filePath !== "." && <button className="file-row" onClick={() => void browseFiles(fileThreadId, parentPath(filePath))}><ArrowLeft size={15} /><span>上一级</span></button>}
             {fileEntries.map((entry) => <button className="file-row" disabled={entry.type === "other"} key={entry.path} onClick={() => entry.type === "directory" ? void browseFiles(fileThreadId, entry.path) : void previewFile(fileThreadId, entry.path)}>{entry.type === "directory" ? <FolderOpen size={15} /> : isImagePath(entry.path) ? <Image size={15} /> : <FileText size={15} />}<span>{entry.name}</span>{entry.size !== null && entry.type === "file" && <small>{formatBytes(entry.size)}</small>}</button>)}
           </aside>
-          <main className="file-preview">{fileBusy ? <div className="preview-empty"><RefreshCw className="spin" size={24} /> 读取中…</div> : filePreview ? <FilePreviewView preview={filePreview} openImage={(src, alt) => setZoomedImage({ src, alt })} /> : <div className="preview-empty"><FileText size={30} />选择文件查看内容</div>}</main>
+          <main className="file-preview">{fileBusy ? <div className="preview-empty"><RefreshCw className="spin" size={24} /> 读取中…</div> : filePreview ? <FilePreviewView preview={filePreview} openImage={(src, alt) => setZoomedImage({ src, alt })} download={() => void downloadFile(fileThreadId, filePreview.path)} /> : <div className="preview-empty"><FileText size={30} />选择文件查看内容</div>}</main>
         </div>
       </section></div>}
       {zoomedImage && <div className="image-lightbox" role="dialog" aria-modal="true" aria-label="图片放大预览" onClick={() => setZoomedImage(null)}><button className="lightbox-close" onClick={() => setZoomedImage(null)} aria-label="关闭图片预览"><X size={22} /></button><img src={zoomedImage.src} alt={zoomedImage.alt} onClick={(event) => event.stopPropagation()} /></div>}
@@ -1320,9 +1473,22 @@ function DiffView({ diff }: { diff: string }) {
   return <pre className="diff-view">{diff.split("\n").map((line, index) => <span className={line.startsWith("+") && !line.startsWith("+++") ? "diff-add" : line.startsWith("-") && !line.startsWith("---") ? "diff-delete" : line.startsWith("@@") ? "diff-hunk" : ""} key={`${index}-${line.slice(0, 20)}`}>{line || " "}</span>)}</pre>;
 }
 
-function FilePreviewView({ preview, openImage }: { preview: FilePreview; openImage: (src: string, alt: string) => void }) {
+function FilePreviewView({ preview, openImage, download }: { preview: FilePreview; openImage: (src: string, alt: string) => void; download: () => void }) {
   const language = languageFromPath(preview.path);
-  return <article className="preview-content"><header><strong>{preview.path}</strong><div className="preview-meta">{preview.kind === "text" && <span>{language}</span>}<small>{formatBytes(preview.size)}{preview.mimeType ? ` · ${preview.mimeType}` : ""}</small></div></header>{preview.kind === "image" && preview.dataUrl ? <button type="button" className="image-preview" onClick={() => openImage(preview.dataUrl as string, preview.path)} title="点击放大"><img src={preview.dataUrl} alt={preview.path} /><span><ZoomIn size={17} /> 点击放大</span></button> : preview.kind === "text" ? <HighlightedFile content={preview.content ?? ""} language={language} /> : <div className="preview-empty">二进制文件不支持文本预览</div>}</article>;
+  return <article className="preview-content"><header><strong>{preview.path}</strong><div className="preview-meta">{preview.kind === "text" && <span>{language}</span>}<small>{formatBytes(preview.size)}{preview.mimeType ? ` · ${preview.mimeType}` : ""}</small><button onClick={download} title="下载文件"><Download size={14} /> 下载</button></div></header>{preview.kind === "image" && preview.dataUrl ? <button type="button" className="image-preview" onClick={() => openImage(preview.dataUrl as string, preview.path)} title="点击放大"><img src={preview.dataUrl} alt={preview.path} /><span><ZoomIn size={17} /> 点击放大</span></button> : preview.kind === "text" ? <HighlightedFile content={preview.content ?? ""} language={language} /> : <div className="preview-empty">二进制文件不支持文本预览</div>}</article>;
+}
+
+function fileBase64(file: File): Promise<string> {
+  return new Promise((resolveFile, rejectFile) => {
+    const reader = new FileReader();
+    reader.onerror = () => rejectFile(reader.error ?? new Error("读取上传文件失败"));
+    reader.onload = () => {
+      const value = String(reader.result ?? "");
+      const comma = value.indexOf(",");
+      if (comma < 0) rejectFile(new Error("无法编码上传文件")); else resolveFile(value.slice(comma + 1));
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 function HighlightedFile({ content, language }: { content: string; language: Language }) {

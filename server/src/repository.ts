@@ -1,20 +1,44 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { db } from "./db/database.js";
-import { auditEvents, conversations, machineEnrollments, machines, user } from "./db/schema.js";
+import { auditEvents, conversations, machines, tenantMembers, tenants, user } from "./db/schema.js";
+import { decryptSecret, encryptSecret } from "./secret-box.js";
 
 const queryDb = db as any;
 
 export interface MachineRecord {
   id: string;
+  tenantId: string;
   ownerUserId: string;
   name: string;
   kind: string;
-  agentVersion: string | null;
   codexVersion: string | null;
   capabilities: string[];
   lastSeenAt: Date | null;
   revokedAt: Date | null;
+  sshHost: string | null;
+  sshPort: number | null;
+  sshUsername: string | null;
+  sshPublicKey: string | null;
+  sshHostKeySha256: string | null;
+  sshCodexCommand: string | null;
+  connectionMode: string;
+  tunnelPublicKey: string | null;
+}
+
+export interface SshCredentialRecord extends MachineRecord {
+  credential: { privateKey: string; passphrase?: string };
+}
+
+export interface CreateSshHostInput {
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  privateKey: string;
+  passphrase?: string;
+  publicKey?: string;
+  hostKeySha256: string;
+  codexCommand: string;
 }
 
 export interface UserSettings {
@@ -33,6 +57,17 @@ export interface ConversationMetadata {
 
 export async function ensureFirstUserAdmin(userId: string): Promise<void> {
   await queryDb.execute(sql`update "user" set "role" = 'admin' where "id" = ${userId} and not exists (select 1 from "user" where "role" = 'admin')`);
+}
+
+export async function ensurePersonalTenant(userId: string): Promise<string> {
+  const [membership] = await queryDb.select({ tenantId: tenantMembers.tenantId }).from(tenantMembers).where(eq(tenantMembers.userId, userId)).orderBy(tenantMembers.createdAt).limit(1);
+  if (membership) return membership.tenantId;
+  const [account] = await queryDb.select({ name: user.name }).from(user).where(eq(user.id, userId)).limit(1);
+  if (!account) throw new Error("User not found");
+  const slug = `personal-${userId}`.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 120);
+  const [tenant] = await queryDb.insert(tenants).values({ name: `${account.name || "Personal"}`, slug }).onConflictDoUpdate({ target: tenants.slug, set: { updatedAt: new Date() } }).returning({ id: tenants.id });
+  await queryDb.insert(tenantMembers).values({ tenantId: tenant.id, userId, role: "owner" }).onConflictDoNothing();
+  return tenant.id;
 }
 
 export async function listUsers(): Promise<Array<{ id: string; name: string; email: string; role: string; banned: boolean; banReason: string | null; createdAt: Date }>> {
@@ -68,71 +103,87 @@ export async function updateUserSettings(userId: string, settings: UserSettings)
 }
 
 export async function ensureLocalMachine(userId: string): Promise<MachineRecord | null> {
+  const tenantId = await ensurePersonalTenant(userId);
   const [existing] = await queryDb.select().from(machines).where(eq(machines.kind, "local")).limit(1);
   if (existing) return existing.ownerUserId === userId && !existing.revokedAt ? existing : null;
-  const [created] = await queryDb.insert(machines).values({ ownerUserId: userId, name: "本机 Codex", kind: "local", capabilities: ["local-app-server", "file-preview"] }).returning();
+  const [created] = await queryDb.insert(machines).values({ tenantId, ownerUserId: userId, name: "本机 Codex", kind: "local", capabilities: ["local-app-server", "file-preview"] }).returning();
   return created;
 }
 
 export async function listMachines(userId: string): Promise<MachineRecord[]> {
-  return queryDb.select().from(machines).where(and(eq(machines.ownerUserId, userId), isNull(machines.revokedAt))).orderBy(machines.createdAt);
+  await ensurePersonalTenant(userId);
+  return queryDb.select(machinePublicColumns).from(machines).innerJoin(tenantMembers, and(eq(tenantMembers.tenantId, machines.tenantId), eq(tenantMembers.userId, userId))).where(isNull(machines.revokedAt)).orderBy(machines.createdAt);
 }
 
-export async function createMachineEnrollment(userId: string): Promise<{ code: string; expiresAt: Date }> {
-  const code = formatEnrollmentCode(randomBytes(9).toString("base64url").toUpperCase());
-  const expiresAt = new Date(Date.now() + 10 * 60_000);
-  await queryDb.insert(machineEnrollments).values({ userId, codeHash: digest(normalizeEnrollmentCode(code)), expiresAt });
-  await recordAudit({ userId, action: "machine.enrollment.created" });
-  return { code, expiresAt };
+export async function createSshHost(userId: string, input: CreateSshHostInput): Promise<MachineRecord> {
+  const tenantId = await ensurePersonalTenant(userId);
+  const [machine] = await queryDb.insert(machines).values({
+    tenantId,
+    ownerUserId: userId,
+    name: input.name,
+    kind: "ssh",
+    capabilities: ["ssh", "codex-app-server"],
+    sshHost: input.host,
+    sshPort: input.port,
+    sshUsername: input.username,
+    sshPrivateKeyEncrypted: encryptSecret({ privateKey: input.privateKey, ...(input.passphrase ? { passphrase: input.passphrase } : {}) }),
+    sshPublicKey: input.publicKey ?? null,
+    sshHostKeySha256: input.hostKeySha256,
+    sshCodexCommand: input.codexCommand,
+  }).returning(machinePublicColumns);
+  await recordAudit({ userId, machineId: machine.id, action: "ssh_host.created", metadata: { host: input.host, port: input.port, username: input.username, hostKeySha256: input.hostKeySha256 } });
+  return machine;
 }
 
-export async function redeemMachineEnrollment(code: string, name: string): Promise<{ machine: MachineRecord; credential: string }> {
-  const codeHash = digest(normalizeEnrollmentCode(code));
-  const result = await queryDb.transaction(async (tx: any) => {
-    const [enrollment] = await tx.select().from(machineEnrollments).where(and(eq(machineEnrollments.codeHash, codeHash), isNull(machineEnrollments.usedAt))).for("update").limit(1);
-    if (!enrollment || enrollment.expiresAt.getTime() <= Date.now()) throw new Error("配对码无效或已过期");
-    const credential = randomBytes(32).toString("base64url");
-    const [machine] = await tx.insert(machines).values({
-      ownerUserId: enrollment.userId,
-      name: name.trim() || "Codex Machine",
-      credentialHash: digest(credential),
-      kind: "agent",
-      capabilities: [],
-    }).returning();
-    await tx.update(machineEnrollments).set({ usedAt: new Date() }).where(eq(machineEnrollments.id, enrollment.id));
-    await tx.insert(auditEvents).values({ userId: enrollment.userId, machineId: machine.id, action: "machine.paired" });
-    return { machine, credential };
-  });
-  return result;
+export async function getSshHost(userId: string, machineId: string): Promise<SshCredentialRecord | null> {
+  const [row] = await queryDb.select({ machine: machines }).from(machines).innerJoin(tenantMembers, and(eq(tenantMembers.tenantId, machines.tenantId), eq(tenantMembers.userId, userId))).where(and(eq(machines.id, machineId), eq(machines.kind, "ssh"), isNull(machines.revokedAt))).limit(1);
+  const machine = row?.machine;
+  if (!machine?.sshPrivateKeyEncrypted) return null;
+  return { ...machine, credential: decryptSecret<{ privateKey: string; passphrase?: string }>(machine.sshPrivateKeyEncrypted) } as SshCredentialRecord;
 }
 
-export async function authenticateMachine(machineId: string, credential: string): Promise<MachineRecord | null> {
-  const [machine] = await queryDb.select().from(machines).where(and(eq(machines.id, machineId), isNull(machines.revokedAt))).limit(1);
-  if (!machine?.credentialHash) return null;
-  const actual = Buffer.from(digest(credential));
-  const expected = Buffer.from(machine.credentialHash);
-  return actual.length === expected.length && timingSafeEqual(actual, expected) ? machine : null;
-}
-
-export async function updateMachinePresence(machineId: string, details: { agentVersion?: string; codexVersion?: string; capabilities?: string[] } = {}): Promise<void> {
+export async function updateMachinePresence(machineId: string, details: { codexVersion?: string; capabilities?: string[] } = {}): Promise<void> {
   await queryDb.update(machines).set({ ...details, lastSeenAt: new Date(), updatedAt: new Date() }).where(eq(machines.id, machineId));
 }
 
+export async function enableMachineTunnel(userId: string, machineId: string, publicKey: string): Promise<boolean> {
+  if (!await machineBelongsToUser(machineId, userId)) return false;
+  const rows = await queryDb.update(machines).set({ connectionMode: "reverse-ssh", tunnelPublicKey: publicKey, updatedAt: new Date() }).where(and(eq(machines.id, machineId), eq(machines.kind, "ssh"), isNull(machines.revokedAt))).returning({ id: machines.id });
+  if (rows.length) await recordAudit({ userId, machineId, action: "ssh_tunnel.enabled" });
+  return rows.length > 0;
+}
+
+export async function disableMachineTunnel(userId: string, machineId: string): Promise<boolean> {
+  if (!await machineBelongsToUser(machineId, userId)) return false;
+  const rows = await queryDb.update(machines).set({ connectionMode: "direct", tunnelPublicKey: null, updatedAt: new Date() }).where(eq(machines.id, machineId)).returning({ id: machines.id });
+  if (rows.length) await recordAudit({ userId, machineId, action: "ssh_tunnel.disabled" });
+  return rows.length > 0;
+}
+
+export async function getTunnelMachine(machineId: string): Promise<Pick<MachineRecord, "id" | "tenantId" | "tunnelPublicKey" | "revokedAt"> | null> {
+  const [machine] = await queryDb.select({ id: machines.id, tenantId: machines.tenantId, tunnelPublicKey: machines.tunnelPublicKey, revokedAt: machines.revokedAt }).from(machines).where(and(eq(machines.id, machineId), eq(machines.connectionMode, "reverse-ssh"), isNull(machines.revokedAt))).limit(1);
+  return machine ?? null;
+}
+
 export async function revokeMachine(userId: string, machineId: string): Promise<boolean> {
-  const rows = await queryDb.update(machines).set({ revokedAt: new Date(), updatedAt: new Date() }).where(and(eq(machines.id, machineId), eq(machines.ownerUserId, userId), eq(machines.kind, "agent"))).returning({ id: machines.id });
+  if (!await machineBelongsToUser(machineId, userId)) return false;
+  const rows = await queryDb.update(machines).set({ revokedAt: new Date(), sshPrivateKeyEncrypted: null, tunnelPublicKey: null, updatedAt: new Date() }).where(eq(machines.id, machineId)).returning({ id: machines.id });
   if (rows.length) await recordAudit({ userId, machineId, action: "machine.revoked" });
   return rows.length > 0;
 }
 
 export async function machineBelongsToUser(machineId: string, userId: string): Promise<boolean> {
-  const [machine] = await queryDb.select({ id: machines.id }).from(machines).where(and(eq(machines.id, machineId), eq(machines.ownerUserId, userId), isNull(machines.revokedAt))).limit(1);
+  const [machine] = await queryDb.select({ id: machines.id }).from(machines).innerJoin(tenantMembers, and(eq(tenantMembers.tenantId, machines.tenantId), eq(tenantMembers.userId, userId))).where(and(eq(machines.id, machineId), isNull(machines.revokedAt))).limit(1);
   return Boolean(machine);
 }
 
 export async function upsertConversation(userId: string, machineId: string, thread: Record<string, unknown>, metadata?: ConversationMetadata): Promise<Record<string, unknown>> {
   if (typeof thread.id !== "string") return thread;
+  const [machine] = await queryDb.select({ tenantId: machines.tenantId }).from(machines).innerJoin(tenantMembers, and(eq(tenantMembers.tenantId, machines.tenantId), eq(tenantMembers.userId, userId))).where(eq(machines.id, machineId)).limit(1);
+  if (!machine) throw new Error("Machine not found");
   const effectiveMetadata = metadata ?? (typeof thread.name === "string" && thread.name.endsWith(" · 侧聊") ? { kind: "side" as const } : undefined);
   const [conversation] = await queryDb.insert(conversations).values({
+    tenantId: machine.tenantId,
     ownerUserId: userId,
     machineId,
     remoteThreadId: thread.id,
@@ -167,17 +218,30 @@ export async function resolveConversation(userId: string, conversationId: string
 }
 
 export async function recordAudit(input: { userId?: string; machineId?: string; conversationId?: string; action: string; metadata?: Record<string, unknown> }): Promise<void> {
-  await queryDb.insert(auditEvents).values({ ...input, metadata: input.metadata ?? {} });
+  let tenantId: string | undefined;
+  if (input.machineId) {
+    const [machine] = await queryDb.select({ tenantId: machines.tenantId }).from(machines).where(eq(machines.id, input.machineId)).limit(1);
+    tenantId = machine?.tenantId;
+  } else if (input.userId) tenantId = await ensurePersonalTenant(input.userId);
+  await queryDb.insert(auditEvents).values({ ...input, tenantId, metadata: input.metadata ?? {} });
 }
 
-function digest(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
-function normalizeEnrollmentCode(code: string): string {
-  return code.replace(/[^A-Z0-9]/gi, "").toUpperCase();
-}
-
-function formatEnrollmentCode(value: string): string {
-  return value.match(/.{1,4}/g)?.join("-") ?? value;
-}
+const machinePublicColumns = {
+  id: machines.id,
+  tenantId: machines.tenantId,
+  ownerUserId: machines.ownerUserId,
+  name: machines.name,
+  kind: machines.kind,
+  codexVersion: machines.codexVersion,
+  capabilities: machines.capabilities,
+  lastSeenAt: machines.lastSeenAt,
+  revokedAt: machines.revokedAt,
+  sshHost: machines.sshHost,
+  sshPort: machines.sshPort,
+  sshUsername: machines.sshUsername,
+  sshPublicKey: machines.sshPublicKey,
+  sshHostKeySha256: machines.sshHostKeySha256,
+  sshCodexCommand: machines.sshCodexCommand,
+  connectionMode: machines.connectionMode,
+  tunnelPublicKey: machines.tunnelPublicKey,
+};

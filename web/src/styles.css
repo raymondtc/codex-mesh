@@ -257,7 +257,12 @@ select, input { color: var(--text); background: var(--panel-2); border: 1px soli
 .machine-list article { min-height: 52px; padding: 8px 9px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel-2); display: flex; align-items: center; gap: 10px; }
 .machine-list article > span { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
 .machine-list article strong { font-size: 12px; }.machine-list article small { color: var(--muted); font-size: 9px; }
-.machine-list article > button { width: 30px; height: 30px; border: 0; border-radius: 7px; background: transparent; color: var(--danger); display: grid; place-items: center; cursor: pointer; }
+.machine-list article > button { min-height: 30px; padding: 0 8px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); display: grid; place-items: center; cursor: pointer; font-size: 10px; }
+.machine-list article > button:last-child { color: var(--danger); }
+
+.attachment-list { display: flex; flex-wrap: wrap; gap: 6px; padding: 7px 9px 0; }
+.attachment-list > span { max-width: 240px; padding: 4px 7px; border-radius: 7px; background: var(--panel-2); color: var(--muted); display: flex; align-items: center; gap: 5px; font-size: 10px; }
+.attachment-list > span > button, .attach-button { border: 0; background: transparent; color: inherit; display: grid; place-items: center; cursor: pointer; }
 .user-modal { width: min(760px, 96vw); }
 .modal-error { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid rgba(255,141,122,.35); border-radius: 9px; background: rgba(255,141,122,.08); color: var(--danger); font-size: 11px; }.modal-error span { flex: 1; }.modal-error button { padding: 3px; border: 0; background: transparent; color: inherit; cursor: pointer; }
 .user-create { display: grid; gap: 8px; margin-bottom: 4px; padding: 12px; border: 1px solid var(--border); border-radius: 11px; background: var(--panel-2); }
@@ -274,6 +279,19 @@ select, input { color: var(--text); background: var(--panel-2); border: 1px soli
 .pairing-code { padding: 11px; border: 1px solid rgba(216,255,133,.25); border-radius: 10px; background: rgba(216,255,133,.05); display: grid; gap: 8px; }
 .pairing-code small { color: var(--muted); }.pairing-code code { overflow-wrap: anywhere; color: var(--accent); font-size: 10px; line-height: 1.55; }
 .pairing-code button { width: fit-content; border: 0; background: transparent; color: var(--accent); display: flex; align-items: center; gap: 5px; cursor: pointer; }
+.ssh-host-form { display: grid; gap: 10px; padding-top: 4px; }
+.ssh-config-import { width: fit-content; min-height: 34px; padding: 0 10px; border: 1px dashed var(--border); border-radius: 8px; cursor: pointer; }
+.ssh-config-import input { display: none; }
+.ssh-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.ssh-form-grid label { display: grid; gap: 5px; }
+.ssh-form-grid .ssh-host-field { grid-column: 1 / 2; }
+.ssh-key-actions, .ssh-fingerprint, .ssh-form-actions { display: flex; align-items: center; gap: 8px; }
+.ssh-key-actions span { color: var(--muted); font-size: 10px; }
+.ssh-key-actions button, .ssh-fingerprint button, .ssh-form-actions button { min-height: 36px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); color: var(--text); cursor: pointer; }
+.ssh-fingerprint code { min-width: 0; overflow-wrap: anywhere; color: var(--accent); font-size: 10px; }
+.ssh-private-key { width: 100%; min-height: 112px; resize: vertical; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); color: var(--text); padding: 9px; font: 10px 'DM Mono', monospace; }
+.ssh-form-actions { justify-content: flex-end; }
+.ssh-form-actions .primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
 .goal-modal textarea { width: 100%; resize: vertical; color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; line-height: 1.5; }
 .goal-stats { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; padding: 6px 2px; }
 .goal-buttons { display: flex; justify-content: flex-end; gap: 7px; }

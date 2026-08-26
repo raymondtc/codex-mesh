@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, realpath, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
@@ -61,10 +61,16 @@ function validBranch(value: string): boolean {
 }
 
 async function handleFileRpc(appServer: AppServerClient, method: string, params: unknown): Promise<unknown> {
-  const input = (params ?? {}) as { threadId?: unknown; path?: unknown };
+  const input = (params ?? {}) as { threadId?: unknown; path?: unknown; dataBase64?: unknown; overwrite?: unknown };
   if (typeof input.threadId !== "string") throw new Error("threadId is required");
   if (input.path !== undefined && typeof input.path !== "string") throw new Error("path must be a string");
   const requestedPath = input.path || ".";
+  if (method === "bridge/fs/writeFile") {
+    const data = decodeUpload(input.dataBase64);
+    const { absolutePath, relativePath } = await resolveNewThreadPath(appServer, input.threadId, requestedPath);
+    await writeFile(absolutePath, data, { flag: input.overwrite === true ? "w" : "wx", mode: 0o600 });
+    return { path: relativePath, absolutePath, size: data.length };
+  }
   const { absolutePath, relativePath } = await resolveThreadPath(appServer, input.threadId, requestedPath);
 
   if (method === "bridge/fs/readDirectory") {
@@ -96,7 +102,27 @@ async function handleFileRpc(appServer: AppServerClient, method: string, params:
     return { path: relativePath, kind: "text", size: metadata.size, content: data.toString("utf8") };
   }
 
+  if (method === "bridge/fs/downloadFile") {
+    const metadata = await stat(absolutePath);
+    if (!metadata.isFile()) throw new Error("Path is not a file");
+    if (metadata.size > 8 * 1024 * 1024) throw new Error("File exceeds download limit (8 MB)");
+    const data = await readFile(absolutePath);
+    return { path: relativePath, size: metadata.size, dataBase64: data.toString("base64"), mimeType: imageMimeType(extname(absolutePath).toLowerCase()) ?? "application/octet-stream" };
+  }
+
   throw new Error(`Unknown bridge file method: ${method}`);
+}
+
+async function resolveNewThreadPath(appServer: AppServerClient, threadId: string, requestedPath: string): Promise<{ absolutePath: string; relativePath: string }> {
+  if (!requestedPath || requestedPath === "." || requestedPath.startsWith("/") || requestedPath.split(/[\\/]/).includes("..")) throw new Error("Invalid upload path");
+  const result = await appServer.request("thread/read", { threadId, includeTurns: false }) as { thread?: { cwd?: string } };
+  if (!result.thread?.cwd) throw new Error("Thread working directory is unavailable");
+  const root = await realpath(result.thread.cwd);
+  if (dirname(requestedPath) === ".codex-mesh-uploads") await mkdir(resolve(root, ".codex-mesh-uploads"), { recursive: true, mode: 0o700 });
+  const parent = await realpath(resolve(root, dirname(requestedPath)));
+  assertWithinRoot(root, parent);
+  const absolutePath = resolve(parent, basename(requestedPath));
+  return { absolutePath, relativePath: relative(root, absolutePath) };
 }
 
 async function resolveThreadPath(appServer: AppServerClient, threadId: string, requestedPath: string): Promise<{ absolutePath: string; relativePath: string }> {
@@ -105,8 +131,20 @@ async function resolveThreadPath(appServer: AppServerClient, threadId: string, r
   const root = await realpath(result.thread.cwd);
   const target = await realpath(resolve(root, requestedPath));
   const fromRoot = relative(root, target);
-  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`)) throw new Error("File path is outside the thread working directory");
+  assertWithinRoot(root, target);
   return { absolutePath: target, relativePath: fromRoot || "." };
+}
+
+function assertWithinRoot(root: string, target: string): void {
+  const fromRoot = relative(root, target);
+  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`)) throw new Error("File path is outside the thread working directory");
+}
+
+function decodeUpload(value: unknown): Buffer {
+  if (typeof value !== "string" || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) throw new Error("dataBase64 must be valid base64");
+  const data = Buffer.from(value, "base64");
+  if (data.length === 0 || data.length > 8 * 1024 * 1024) throw new Error("Upload must be between 1 byte and 8 MB");
+  return data;
 }
 
 function imageMimeType(extension: string): string | undefined {

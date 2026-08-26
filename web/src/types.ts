@@ -52,13 +52,20 @@ export interface Thread {
 
 export interface Machine {
   id: string;
+  tenantId: string;
   name: string;
-  kind: "local" | "agent";
+  kind: "local" | "ssh";
   online: boolean;
-  agentVersion?: string | null;
   codexVersion?: string | null;
   capabilities: string[];
   lastSeenAt?: string | null;
+  sshHost?: string | null;
+  sshPort?: number | null;
+  sshUsername?: string | null;
+  sshPublicKey?: string | null;
+  sshHostKeySha256?: string | null;
+  connectionMode?: "direct" | "reverse-ssh";
+  tunnelPublicKey?: string | null;
 }
 
 export interface Project {
