@@ -278,6 +278,12 @@ export default function App() {
     return result.data;
   }, [bridge]);
 
+  useEffect(() => {
+    if (!showMachines || connection !== "ready") return;
+    const timer = window.setInterval(() => { void loadMachines(); }, 3_000);
+    return () => window.clearInterval(timer);
+  }, [connection, loadMachines, showMachines]);
+
   const refreshSelected = useCallback(async () => {
     const threadId = selectedIdRef.current;
     if (!threadId) return;

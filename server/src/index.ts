@@ -340,7 +340,10 @@ async function startMachine(userId: string, machineId: string): Promise<MachineT
 }
 
 async function machineViews(userId: string): Promise<Array<MachineRecord & { online: boolean }>> {
-  return (await listMachines(userId)).map((machine) => ({ ...machine, online: registry.isOnline(machine.id) }));
+  return (await listMachines(userId)).map((machine) => ({
+    ...machine,
+    online: registry.isOnline(machine.id) || (machine.connectionMode === "reverse-ssh" && Boolean(reverseRelay?.isOnline(machine.id))),
+  }));
 }
 
 function browserRecipients(machineId: string): WebSocket[] {
