@@ -137,7 +137,10 @@ async function resolveThreadPath(appServer: AppServerClient, threadId: string, r
 
 function assertWithinRoot(root: string, target: string): void {
   const fromRoot = relative(root, target);
-  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`)) throw new Error("File path is outside the thread working directory");
+  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`)) {
+    console.warn(`[fs-scope] rejected target=${JSON.stringify(target)} threadRoot=${JSON.stringify(root)}`);
+    throw new Error("File path is outside the thread working directory");
+  }
 }
 
 function decodeUpload(value: unknown): Buffer {

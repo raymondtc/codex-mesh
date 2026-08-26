@@ -186,7 +186,10 @@ export class SshMachineTransport extends EventEmitter implements MachineTranspor
     const target = pathPosix.resolve(root, requested);
     const canonicalRoot = (await this.execText(`realpath -- ${shellQuote(root)}`)).trim();
     const canonicalTarget = (await this.execText(`realpath -- ${shellQuote(target)}`)).trim();
-    if (canonicalTarget !== canonicalRoot && !canonicalTarget.startsWith(`${canonicalRoot}/`)) throw new Error("File path is outside the thread working directory");
+    if (canonicalTarget !== canonicalRoot && !canonicalTarget.startsWith(`${canonicalRoot}/`)) {
+      this.emit("stderr", `[fs-scope] rejected target=${JSON.stringify(canonicalTarget)} threadRoot=${JSON.stringify(canonicalRoot)}\n`);
+      throw new Error("File path is outside the thread working directory");
+    }
     const relativePath = pathPosix.relative(canonicalRoot, canonicalTarget) || ".";
     if (method === "bridge/fs/readDirectory") {
       const encoded = await this.execText(`find ${shellQuote(canonicalTarget)} -mindepth 1 -maxdepth 1 -printf '%f\\0%y\\0%s\\0%T@\\0' | base64 -w0`, 4 * 1024 * 1024);

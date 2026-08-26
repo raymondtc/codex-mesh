@@ -131,6 +131,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .markdown > :last-child { margin-bottom: 0; }
 .markdown p, .markdown ul, .markdown ol { margin: 0 0 12px; }
 .markdown a { color: var(--accent); }
+.markdown-file-link { margin: 0; padding: 0; border: 0; background: transparent; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
 .markdown code, code, pre { font-family: 'DM Mono', ui-monospace, monospace; }
 .markdown :not(pre) > code { background: var(--panel-3); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; font-size: .88em; }
 .markdown pre, .tool-card pre, .approval-card pre { overflow: auto; padding: 13px; border-radius: 8px; background: #090b0a; border: 1px solid var(--border); color: #cbd4ce; font-size: 11px; line-height: 1.55; white-space: pre-wrap; }

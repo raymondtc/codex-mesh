@@ -720,7 +720,7 @@ export default function App() {
     }
     const optimisticId = clientId();
     const turnAttachments = [...attachments];
-    const attachmentNote = turnAttachments.length ? `\n\nUploaded files:\n${turnAttachments.map((item) => `- ${item.absolutePath}`).join("\n")}` : "";
+    const attachmentNote = turnAttachments.length ? `\n\nUploaded files (relative to the thread workspace):\n${turnAttachments.map((item) => `- ${item.path}`).join("\n")}` : "";
     const effectiveMessage = `${message || "Please inspect the attached files."}${attachmentNote}`;
     setDraft("");
     setAttachments([]);
@@ -1473,7 +1473,7 @@ function MarkdownContent({ text, threadId, openFile, openImage }: { text: string
     a: ({ href, children }) => {
       const path = href ? localFilePath(href) : null;
       return path
-        ? <a href={href} onClick={(event) => { event.preventDefault(); void openFile(threadId, path); }}>{children}</a>
+        ? <button type="button" className="markdown-file-link" onClick={() => void openFile(threadId, path)}>{children}</button>
         : <a href={href} target="_blank" rel="noreferrer">{children}</a>;
     },
     img: ({ src, alt }) => {
