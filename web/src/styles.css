@@ -287,6 +287,7 @@ select, input { color: var(--text); background: var(--panel-2); border: 1px soli
 .ssh-mode-select button { min-height: 40px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel-2); color: var(--muted); cursor: pointer; }
 .ssh-mode-select button.selected { border-color: var(--accent); background: rgba(216,255,133,.08); color: var(--accent); }
 .mode-hint { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.reverse-setup-button { min-height: 44px; justify-content: center; }
 .ssh-config-import { width: fit-content; min-height: 34px; padding: 0 10px; border: 1px dashed var(--border); border-radius: 8px; cursor: pointer; }
 .ssh-config-import input { display: none; }
 .ssh-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
