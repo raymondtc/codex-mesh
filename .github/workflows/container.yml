@@ -57,3 +57,31 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
+
+  deploy-development:
+    if: github.ref == 'refs/heads/develop'
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: development
+    steps:
+      - name: Configure restricted deployment SSH key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DMIT17_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.DMIT17_SSH_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dmit17_deploy
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/dmit17_deploy ~/.ssh/known_hosts
+      - name: Deploy dev image to dmit17
+        env:
+          DEPLOY_HOST: ${{ secrets.DMIT17_SSH_HOST }}
+          DEPLOY_USER: ${{ secrets.DMIT17_SSH_USER }}
+        run: |
+          ssh -i ~/.ssh/dmit17_deploy \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=15 \
+            "$DEPLOY_USER@$DEPLOY_HOST" "deploy $GITHUB_SHA"

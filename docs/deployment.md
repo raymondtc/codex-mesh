@@ -9,6 +9,15 @@
 
 Changes should enter `develop` through a pull request, soak on the `dev` image, and then be merged from `develop` to `main`. Stable releases are cut from `main`. Protect both branches and require the `CI / verify` check; require reviews on `main`.
 
+Every successful `develop` container build triggers the `development` environment deployment on dmit17. GitHub Actions connects with a dedicated SSH key whose server-side `authorized_keys` entry is restricted to `deploy/deploy-dev.sh`; it cannot open a shell, PTY, tunnel, or agent forwarding. The host pulls `:dev`, recreates the service, waits for container health, and automatically rolls back to the previous immutable image digest on failure.
+
+The `development` GitHub environment requires these secrets:
+
+- `DMIT17_SSH_HOST`
+- `DMIT17_SSH_USER`
+- `DMIT17_SSH_PRIVATE_KEY`
+- `DMIT17_SSH_KNOWN_HOSTS`
+
 ## Pull a published image
 
 Copy `deploy/compose.yml` and create `.env` beside the repository root or pass it explicitly:
