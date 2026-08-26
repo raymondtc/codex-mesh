@@ -426,6 +426,7 @@ async function createTunnelSetup(userId: string, machineId: string, targetPort: 
   if (!await enableMachineTunnel(userId, machineId, keys.public)) throw new Error("SSH machine not found");
   registry.unregister(machineId);
   const knownHost = relayPort === 22 ? relayPublicHost : `[${relayPublicHost}]:${relayPort}`;
+  const installDir = `/etc/codex-mesh/tunnels/${machineId}`;
   return {
     machineId,
     privateKey: keys.private,
@@ -433,8 +434,10 @@ async function createTunnelSetup(userId: string, machineId: string, targetPort: 
     relayHost: relayPublicHost,
     relayPort,
     relayHostKeySha256: reverseRelay.hostKeySha256,
+    installDir,
+    serviceName: `codex-mesh-tunnel-${machineId}`,
     knownHostsLine: `${knownHost} ${reverseRelay.hostPublicKey}`,
-    command: `ssh -NT -i /etc/codex-mesh/tunnel_ed25519 -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/codex-mesh/relay_known_hosts -R 127.0.0.1:0:127.0.0.1:${targetPort} ${machineId}@${relayPublicHost} -p ${relayPort}`,
+    command: `ssh -NT -i ${installDir}/tunnel_ed25519 -o IdentitiesOnly=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=yes -o UserKnownHostsFile=${installDir}/relay_known_hosts -R 127.0.0.1:0:127.0.0.1:${targetPort} ${machineId}@${relayPublicHost} -p ${relayPort}`,
   };
 }
 

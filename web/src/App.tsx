@@ -143,6 +143,8 @@ interface TunnelSetup {
   relayHost: string;
   relayPort: number;
   relayHostKeySha256: string;
+  installDir: string;
+  serviceName: string;
 }
 
 function authorizedKeyScript(publicKey: string): string {
@@ -159,11 +161,11 @@ function normalizeSshFingerprint(value: string): string {
 }
 
 function tunnelInstallScript(setup: TunnelSetup): string {
-  return `sudo sh -c 'umask 077; install -d -m 700 /etc/codex-mesh; cat > /etc/codex-mesh/tunnel_ed25519 <<"KEY"\n${setup.privateKey.trimEnd()}\nKEY\ncat > /etc/codex-mesh/relay_known_hosts <<"HOST"\n${setup.knownHostsLine}\nHOST\nchmod 600 /etc/codex-mesh/tunnel_ed25519 /etc/codex-mesh/relay_known_hosts'\nsudo ${setup.command}`;
+  return `sudo sh -c 'umask 077; install -d -m 700 ${setup.installDir}; cat > ${setup.installDir}/tunnel_ed25519 <<"KEY"\n${setup.privateKey.trimEnd()}\nKEY\ncat > ${setup.installDir}/relay_known_hosts <<"HOST"\n${setup.knownHostsLine}\nHOST\nchmod 600 ${setup.installDir}/tunnel_ed25519 ${setup.installDir}/relay_known_hosts'\nsudo ${setup.command}`;
 }
 
 function tunnelSystemdInstallScript(setup: TunnelSetup): string {
-  return `sudo sh -c 'umask 077; install -d -m 700 /etc/codex-mesh; cat > /etc/codex-mesh/tunnel_ed25519 <<"KEY"\n${setup.privateKey.trimEnd()}\nKEY\ncat > /etc/codex-mesh/relay_known_hosts <<"HOST"\n${setup.knownHostsLine}\nHOST\ncat > /etc/systemd/system/codex-mesh-tunnel.service <<"UNIT"\n[Unit]\nDescription=Codex Mesh reverse SSH tunnel\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=${setup.command}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\nUNIT\nchmod 600 /etc/codex-mesh/tunnel_ed25519 /etc/codex-mesh/relay_known_hosts\nsystemctl daemon-reload\nsystemctl enable --now codex-mesh-tunnel.service'`;
+  return `sudo sh -c 'umask 077; install -d -m 700 ${setup.installDir}; cat > ${setup.installDir}/tunnel_ed25519 <<"KEY"\n${setup.privateKey.trimEnd()}\nKEY\ncat > ${setup.installDir}/relay_known_hosts <<"HOST"\n${setup.knownHostsLine}\nHOST\ncat > /etc/systemd/system/${setup.serviceName}.service <<"UNIT"\n[Unit]\nDescription=Codex Mesh reverse SSH tunnel ${setup.machineId}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=${setup.command}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\nUNIT\nchmod 600 ${setup.installDir}/tunnel_ed25519 ${setup.installDir}/relay_known_hosts\nsystemctl daemon-reload\nsystemctl enable --now ${setup.serviceName}.service'`;
 }
 
 export default function App() {
