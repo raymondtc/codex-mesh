@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     host: process.env.VITE_HOST ?? "127.0.0.1",
     port: 5173,
+    allowedHosts: ["cm-dev.cs.ray17.top"],
     proxy: {
       "/api": "http://127.0.0.1:8787",
       "/ws": { target: "ws://127.0.0.1:8787", ws: true },

@@ -2,6 +2,7 @@ node_modules/
 dist/
 .env
 .env.lan
+.env.dev-local
 .data/
 protocol/
 *.log
