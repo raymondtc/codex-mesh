@@ -171,7 +171,7 @@ export class SshMachineTransport extends EventEmitter implements MachineTranspor
     if (input.path !== undefined && typeof input.path !== "string") throw new Error("path must be a string");
     const root = await this.threadRoot(input.threadId);
     const requested = input.path || ".";
-    if (pathPosix.isAbsolute(requested) || requested.split("/").includes("..")) throw new Error("File path is outside the thread working directory");
+    if (requested.split("/").includes("..")) throw new Error("File path is outside the thread working directory");
     if (method === "bridge/fs/writeFile") {
       const data = decodeUpload(input.dataBase64);
       if (!requested || requested === ".") throw new Error("Invalid upload path");
